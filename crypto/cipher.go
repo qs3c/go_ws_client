@@ -1,0 +1,361 @@
+package crypto
+
+/*
+#cgo CFLAGS: -IE:/Tongsuo-8.3-stable/include -DOPENSSL_API_COMPAT=0x10100000L
+#cgo LDFLAGS: -LE:/Tongsuo-8.3-stable -lcrypto -lssl
+#include "shim.h"
+*/
+import "C"
+
+import (
+	"fmt"
+	"runtime"
+	"unsafe"
+)
+
+const (
+	GCMTagMaxLen = 16
+)
+
+const (
+	CipherModeECB = 1
+	CipherModeCBC = 2
+	CipherModeCFB = 3
+	CipherModeOFB = 4
+	CipherModeCTR = 5
+	CipherModeGCM = 6
+	CipherModeCCM = 7
+)
+
+type CipherCtx interface {
+	Ctx() *C.EVP_CIPHER_CTX
+	Cipher() *Cipher
+	BlockSize() int
+	KeySize() int
+	IVSize() int
+	SetKeyAndIV(key, iv []byte) error
+	SetPadding(pad bool)
+	SetCtrl(code, arg int) error
+	SetCtrlBytes(code, arg int, value []byte) error
+	GetCtrlInt(code, arg int) (int, error)
+	GetCtrlBytes(code, arg, expectsize int) ([]byte, error)
+}
+
+type Cipher struct {
+	ptr *C.EVP_CIPHER
+}
+
+func (c *Cipher) Ptr() *C.EVP_CIPHER {
+	return c.ptr
+}
+
+func (c *Cipher) Nid() NID {
+	return NID(C.EVP_CIPHER_nid(c.ptr))
+}
+
+func (c *Cipher) ShortName() (string, error) {
+	return Nid2ShortName(c.Nid())
+}
+
+func (c *Cipher) BlockSize() int {
+	return int(C.EVP_CIPHER_block_size(c.ptr))
+}
+
+func (c *Cipher) KeySize() int {
+	return int(C.EVP_CIPHER_key_length(c.ptr))
+}
+
+func (c *Cipher) IVSize() int {
+	return int(C.EVP_CIPHER_iv_length(c.ptr))
+}
+
+func Nid2ShortName(nid NID) (string, error) {
+	sn := C.OBJ_nid2sn(C.int(nid))
+	if sn == nil {
+		return "", PopError()
+	}
+	return C.GoString(sn), nil
+}
+
+func GetCipherByName(name string) (*Cipher, error) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	p := C.EVP_get_cipherbyname(cname)
+	if p == nil {
+		return nil, ErrCipherNotFound
+	}
+	// we can consider ciphers to use static mem; don't need to free
+	return &Cipher{ptr: p}, nil
+}
+
+func GetCipherByNid(nid NID) (*Cipher, error) {
+	sn, err := Nid2ShortName(nid)
+	if err != nil {
+		return nil, err
+	}
+	return GetCipherByName(sn)
+}
+
+type cipherCtx struct {
+	ctx *C.EVP_CIPHER_CTX
+}
+
+func newCipherCtx() (*cipherCtx, error) {
+	cctx := C.EVP_CIPHER_CTX_new()
+	if cctx == nil {
+		return nil, ErrMallocFailure
+	}
+	ctx := &cipherCtx{cctx}
+	runtime.SetFinalizer(ctx, func(ctx *cipherCtx) {
+		C.EVP_CIPHER_CTX_free(ctx.ctx)
+	})
+	return ctx, nil
+}
+
+func (ctx *cipherCtx) SetKeyAndIV(key, iv []byte) error {
+	var kptr, iptr *C.uchar
+	if key != nil {
+		if len(key) != ctx.KeySize() {
+			return fmt.Errorf("bad key size (%d bytes instead of %d): %w",
+				len(key), ctx.KeySize(), ErrBadKeySize)
+		}
+		kptr = (*C.uchar)(&key[0])
+	}
+	if iv != nil {
+		if len(iv) != ctx.IVSize() {
+			return fmt.Errorf("bad IV size (%d bytes instead of %d): %w",
+				len(iv), ctx.IVSize(), ErrBadIvSize)
+		}
+		iptr = (*C.uchar)(&iv[0])
+	}
+
+	if kptr != nil || iptr != nil {
+		var res C.int
+		if C.EVP_CIPHER_CTX_encrypting(ctx.ctx) != 0 {
+			// EVP_EncryptInit_ex 函数设计上支持增量配置，首次调用没有配置key和iv，可以后续调用配置
+			// 比如这里是第二次调用 EVP_EncryptInit_ex 配置了 key 和 iv
+			res = C.EVP_EncryptInit_ex(ctx.ctx, nil, nil, kptr, iptr)
+		} else {
+			res = C.EVP_DecryptInit_ex(ctx.ctx, nil, nil, kptr, iptr)
+		}
+		if res != 1 {
+			return PopError()
+		}
+	}
+	return nil
+}
+
+func (ctx *cipherCtx) Ctx() *C.EVP_CIPHER_CTX {
+	return ctx.ctx
+}
+
+func (ctx *cipherCtx) Cipher() *Cipher {
+	return &Cipher{ptr: C.EVP_CIPHER_CTX_cipher(ctx.ctx)}
+}
+
+func (ctx *cipherCtx) BlockSize() int {
+	return int(C.EVP_CIPHER_CTX_block_size(ctx.ctx))
+}
+
+func (ctx *cipherCtx) KeySize() int {
+	return int(C.EVP_CIPHER_CTX_key_length(ctx.ctx))
+}
+
+func (ctx *cipherCtx) IVSize() int {
+	return int(C.EVP_CIPHER_CTX_iv_length(ctx.ctx))
+}
+
+func (ctx *cipherCtx) SetPadding(pad bool) {
+	if pad {
+		C.EVP_CIPHER_CTX_set_padding(ctx.ctx, 1)
+	} else {
+		C.EVP_CIPHER_CTX_set_padding(ctx.ctx, 0)
+	}
+}
+
+func (ctx *cipherCtx) SetCtrl(code, arg int) error {
+	res := C.EVP_CIPHER_CTX_ctrl(ctx.ctx, C.int(code), C.int(arg), nil)
+	if res != 1 {
+		return fmt.Errorf("failed to set code %d to %d [result %d]: %w",
+			code, arg, res, PopError())
+	}
+	return nil
+}
+
+func (ctx *cipherCtx) SetCtrlBytes(code, arg int, value []byte) error {
+	res := C.EVP_CIPHER_CTX_ctrl(ctx.ctx, C.int(code), C.int(arg),
+		unsafe.Pointer(&value[0]))
+	if res != 1 {
+		return fmt.Errorf("failed to set code %d with arg %d to %x [result %d]: %w",
+			code, arg, value, res, PopError())
+	}
+	return nil
+}
+
+func (ctx *cipherCtx) GetCtrlInt(code, arg int) (int, error) {
+	var returnVal C.int
+	res := C.EVP_CIPHER_CTX_ctrl(ctx.ctx, C.int(code), C.int(arg),
+		unsafe.Pointer(&returnVal))
+	if res != 1 {
+		return 0, fmt.Errorf("failed to get code %d with arg %d [result %d]: %w",
+			code, arg, res, PopError())
+	}
+	return int(returnVal), nil
+}
+
+func (ctx *cipherCtx) GetCtrlBytes(code, arg, expectsize int) ([]byte, error) {
+	returnVal := make([]byte, expectsize)
+	res := C.EVP_CIPHER_CTX_ctrl(ctx.ctx, C.int(code), C.int(arg),
+		unsafe.Pointer(&returnVal[0]))
+	if res != 1 {
+		return nil, fmt.Errorf("failed to get code %d with arg %d [result %d]: %w",
+			code, arg, res, PopError())
+	}
+	return returnVal, nil
+}
+
+type EncryptionCipherCtx interface {
+	CipherCtx
+
+	// pass in plaintext, get back ciphertext. can be called
+	// multiple times as needed
+	EncryptUpdate(input []byte) ([]byte, error)
+
+	// call after all plaintext has been passed in; may return
+	// additional ciphertext if needed to finish off a block
+	// or extra padding information
+	EncryptFinal() ([]byte, error)
+}
+
+type DecryptionCipherCtx interface {
+	CipherCtx
+
+	// pass in ciphertext, get back plaintext. can be called
+	// multiple times as needed
+	DecryptUpdate(input []byte) ([]byte, error)
+
+	// call after all ciphertext has been passed in; may return
+	// additional plaintext if needed to finish off a block
+	DecryptFinal() ([]byte, error)
+}
+
+type encryptionCipherCtx struct {
+	*cipherCtx
+}
+
+type decryptionCipherCtx struct {
+	*cipherCtx
+}
+
+func newEncryptionCipherCtx(cipher *Cipher, e *Engine, key, iv []byte) (
+	*encryptionCipherCtx, error,
+) {
+	// 输入除了cipher 都是 nil ，没有 engine
+	if cipher == nil {
+		return nil, ErrNilParameter
+	}
+	// 本质是 EVP_CIPHER_CTX_new 创建 EVP_CIPHER_CTX
+	ctx, err := newCipherCtx()
+	if err != nil {
+		return nil, err
+	}
+	var eptr *C.ENGINE
+	if e != nil {
+		eptr = e.Engine()
+	}
+	// 通过 EVP_CIPHER_CTX 和 EVP_CIPHER 来初始化
+	if C.EVP_EncryptInit_ex(ctx.ctx, cipher.ptr, eptr, nil, nil) != 1 {
+		return nil, PopError()
+	}
+
+	err = ctx.SetKeyAndIV(key, iv)
+	if err != nil {
+		return nil, err
+	}
+	// 最后返回了 EVP_CIPHER_CTX
+	return &encryptionCipherCtx{cipherCtx: ctx}, nil
+}
+
+func newDecryptionCipherCtx(cipher *Cipher, e *Engine, key, iv []byte) (
+	*decryptionCipherCtx, error,
+) {
+	if cipher == nil {
+		return nil, ErrNilParameter
+	}
+	ctx, err := newCipherCtx()
+	if err != nil {
+		return nil, err
+	}
+	var eptr *C.ENGINE
+	if e != nil {
+		eptr = e.Engine()
+	}
+	if C.EVP_DecryptInit_ex(ctx.ctx, cipher.ptr, eptr, nil, nil) != 1 {
+		return nil, PopError()
+	}
+	err = ctx.SetKeyAndIV(key, iv)
+	if err != nil {
+		return nil, err
+	}
+	return &decryptionCipherCtx{cipherCtx: ctx}, nil
+}
+
+func NewEncryptionCipherCtx(c *Cipher, e *Engine, key, iv []byte) (
+	EncryptionCipherCtx, error,
+) {
+	return newEncryptionCipherCtx(c, e, key, iv)
+}
+
+func NewDecryptionCipherCtx(c *Cipher, e *Engine, key, iv []byte) (
+	DecryptionCipherCtx, error,
+) {
+	return newDecryptionCipherCtx(c, e, key, iv)
+}
+
+func (ctx *encryptionCipherCtx) EncryptUpdate(input []byte) ([]byte, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	outbuf := make([]byte, len(input)+ctx.BlockSize())
+	outlen := C.int(len(outbuf))
+	res := C.EVP_EncryptUpdate(ctx.ctx, (*C.uchar)(&outbuf[0]), &outlen,
+		(*C.uchar)(&input[0]), C.int(len(input)))
+	if res != 1 {
+		return nil, fmt.Errorf("failed to encrypt [result %d]: %w", res, PopError())
+	}
+	return outbuf[:outlen], nil
+}
+
+func (ctx *decryptionCipherCtx) DecryptUpdate(input []byte) ([]byte, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	outbuf := make([]byte, len(input)+ctx.BlockSize())
+	outlen := C.int(len(outbuf))
+	res := C.EVP_DecryptUpdate(ctx.ctx, (*C.uchar)(&outbuf[0]), &outlen,
+		(*C.uchar)(&input[0]), C.int(len(input)))
+	if res != 1 {
+		return nil, fmt.Errorf("failed to decrypt [result %d]: %w", res, PopError())
+	}
+	return outbuf[:outlen], nil
+}
+
+func (ctx *encryptionCipherCtx) EncryptFinal() ([]byte, error) {
+	outbuf := make([]byte, ctx.BlockSize())
+	var outlen C.int
+	if C.EVP_EncryptFinal_ex(ctx.ctx, (*C.uchar)(&outbuf[0]), &outlen) != 1 {
+		return nil, fmt.Errorf("encryption failed: %w", PopError())
+	}
+	return outbuf[:outlen], nil
+}
+
+func (ctx *decryptionCipherCtx) DecryptFinal() ([]byte, error) {
+	outbuf := make([]byte, ctx.BlockSize())
+	var outlen C.int
+	if C.EVP_DecryptFinal_ex(ctx.ctx, (*C.uchar)(&outbuf[0]), &outlen) != 1 {
+		// this may mean the tag failed to verify- all previous plaintext
+		// returned must be considered faked and invalid
+		return nil, fmt.Errorf("decryption failed: %w", PopError())
+	}
+	return outbuf[:outlen], nil
+}

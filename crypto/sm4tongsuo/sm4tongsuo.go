@@ -1,0 +1,339 @@
+package sm4tongsuo
+
+/*
+#cgo CFLAGS: -IE:/Tongsuo-8.3-stable/include -DOPENSSL_API_COMPAT=0x10100000L
+#cgo LDFLAGS: -LE:/Tongsuo-8.3-stable -lcrypto -lssl
+#include "../myshim.h"
+*/
+import "C"
+
+import (
+	"bytes"
+	"crypto/cipher"
+	"fmt"
+	"unsafe"
+
+	"github.com/albert/ws_client/crypto"
+
+)
+
+const (
+	BlockSize = 16
+	KeySize   = 16
+)
+
+type Encrypter interface {
+	// crypto.EncryptionCipherCtx
+	SetPadding(pad bool)
+	EncryptAll(input []byte) ([]byte, error)
+	SetAAD(aad []byte)
+	SetTagLen(length int)
+	GetTag() ([]byte, error)
+}
+
+type Decrypter interface {
+	// crypto.DecryptionCipherCtx
+	SetPadding(pad bool)
+	DecryptAll(input []byte) ([]byte, error)
+	SetAAD(aad []byte)
+	SetTag(tag []byte)
+}
+
+type sm4Encrypter struct {
+	cctx   crypto.EncryptionCipherCtx
+	key    []byte
+	iv     []byte
+	aad    []byte
+	tagLen int
+}
+
+type sm4Decrypter struct {
+	cctx crypto.DecryptionCipherCtx
+	key  []byte
+	iv   []byte
+	aad  []byte
+	tag  []byte
+}
+
+type sm4Cipher struct {
+	rk [32]uint32
+}
+
+func (c *sm4Cipher) BlockSize() int {
+	return BlockSize
+}
+
+func NewCipher(key []byte) (cipher.Block, error) {
+	if len(key) != KeySize {
+		return nil, fmt.Errorf("invalid key size: %w", crypto.ErrInvalidKeySize)
+	}
+
+	cipher := &sm4Cipher{}
+	ret := C.SM4_set_key((*C.uchar)(&key[0]), (*C.SM4_KEY)(unsafe.Pointer(&cipher.rk)))
+	if ret != 1 {
+		return nil, fmt.Errorf("failed to set key: %w", crypto.ErrInternalError)
+	}
+
+	return cipher, nil
+}
+
+func (c *sm4Cipher) Encrypt(dst, src []byte) {
+	if len(src) < BlockSize {
+		panic("sm4: input not full block")
+	}
+	if len(dst) < BlockSize {
+		panic("sm4: output not full block")
+	}
+
+	C.SM4_encrypt((*C.uchar)(&src[0]), (*C.uchar)(&dst[0]), (*C.SM4_KEY)(unsafe.Pointer(&c.rk)))
+}
+
+func (c *sm4Cipher) Decrypt(dst, src []byte) {
+	if len(src) < BlockSize {
+		panic("sm4: input not full block")
+	}
+	if len(dst) < BlockSize {
+		panic("sm4: output not full block")
+	}
+
+	C.SM4_decrypt((*C.uchar)(&src[0]), (*C.uchar)(&dst[0]), (*C.SM4_KEY)(unsafe.Pointer(&c.rk)))
+}
+
+func getSM4Cipher(mode int) (*crypto.Cipher, error) {
+
+	// crypto.Cipher 其实就是 EVP_CIPHER
+	var cipher *crypto.Cipher
+	var err error
+
+	switch mode {
+	case crypto.CipherModeECB:
+		cipher, err = crypto.GetCipherByName("SM4-ECB")
+	case crypto.CipherModeCBC:
+		cipher, err = crypto.GetCipherByName("SM4-CBC")
+	case crypto.CipherModeCFB:
+		cipher, err = crypto.GetCipherByName("SM4-CFB")
+	case crypto.CipherModeOFB:
+		cipher, err = crypto.GetCipherByName("SM4-OFB")
+	case crypto.CipherModeCTR:
+		cipher, err = crypto.GetCipherByName("SM4-CTR")
+	case crypto.CipherModeGCM:
+		cipher, err = crypto.GetCipherByName("SM4-GCM")
+	case crypto.CipherModeCCM:
+		cipher, err = crypto.GetCipherByName("SM4-CCM")
+	default:
+		return nil, fmt.Errorf("unsupported sm4 mode: %w", crypto.ErrUnsupportedMode)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cipher: %w", err)
+	}
+
+	return cipher, nil
+}
+
+func NewDecrypter(mode int, key []byte, iv []byte) (*sm4Decrypter, error) {
+	cipher, err := getSM4Cipher(mode)
+	if err != nil {
+		return nil, err
+	}
+
+	cctx, err := crypto.NewDecryptionCipherCtx(cipher, nil, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create decryption cipher ctx %w", err)
+	}
+
+	if len(iv) > 0 {
+		if mode == crypto.CipherModeGCM || mode == crypto.CipherModeCCM {
+			err := cctx.SetCtrl(C.EVP_CTRL_AEAD_SET_IVLEN, len(iv))
+			if err != nil {
+				return nil, fmt.Errorf("failed to set IV len to %d: %w", len(iv), err)
+			}
+		}
+	}
+
+	return &sm4Decrypter{cctx: cctx, key: key, iv: iv, aad: nil, tag: nil}, nil
+}
+
+// 设置 AAD【初始为 nil】
+func (ctx *sm4Decrypter) SetAAD(aad []byte) {
+	ctx.aad = aad
+}
+
+func (ctx *sm4Decrypter) SetTag(tag []byte) {
+	ctx.tag = tag
+}
+
+func (ctx *sm4Decrypter) DecryptAll(src []byte) ([]byte, error) {
+
+	// 如果是GCM和CCM模式，加密会生成tag，解密需要设置 tag
+	if ctx.tag != nil {
+		err := ctx.cctx.SetCtrlBytes(C.EVP_CTRL_AEAD_SET_TAG, len(ctx.tag), ctx.tag)
+		if err != nil {
+			return nil, fmt.Errorf("failed to set tag: %w", err)
+		}
+	}
+
+	err := ctx.cctx.SetKeyAndIV(ctx.key, ctx.iv)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set key or iv: %w", err)
+	}
+
+	var tmplen C.int
+	if ctx.aad != nil {
+		isCcm := (C.EVP_CIPHER_flags(C.X_EVP_CIPHER_CTX_cipher((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()))) &
+			C.EVP_CIPH_MODE) == C.EVP_CIPH_CCM_MODE
+
+		if isCcm {
+			res := C.EVP_DecryptUpdate((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()), nil, &tmplen, nil, C.int(len(src)))
+			if res != 1 {
+				return nil, fmt.Errorf("failed to set CCM plain text length: %w", crypto.PopError())
+			}
+		}
+
+		res := C.EVP_DecryptUpdate((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()), nil, &tmplen, (*C.uchar)(&ctx.aad[0]),
+			C.int(len(ctx.aad)))
+		if res != 1 {
+			return nil, fmt.Errorf("failed to decrypt: %w", crypto.PopError())
+		}
+	}
+
+	res := new(bytes.Buffer)
+	buf, err := ctx.cctx.DecryptUpdate(src)
+	if err != nil {
+		return nil, fmt.Errorf("failed to perform decryption: %w", err)
+	}
+	res.Write(buf)
+
+	buf2, err := ctx.cctx.DecryptFinal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to finalize decryption: %w", err)
+	}
+	res.Write(buf2)
+
+	return res.Bytes(), nil
+}
+
+func (ctx *sm4Decrypter) SetPadding(pad bool) {
+	ctx.cctx.SetPadding(pad)
+}
+
+// 根据 mode 生成不同的 Encrypter
+func NewEncrypter(mode int, key []byte, iv []byte) (*sm4Encrypter, error) {
+	var tagLen int
+
+	// 通过 EVP_get_cipherbyname 获取 EVP_CIPHER
+	cipher, err := getSM4Cipher(mode)
+	if err != nil {
+		return nil, err
+	}
+
+	if mode == crypto.CipherModeGCM {
+		tagLen = 16
+	}
+	if mode == crypto.CipherModeCCM {
+		tagLen = 12
+	}
+
+	// cipher(EVP_CIPHER) 决定了模式
+	// 内部初始化 EVP_CIPHER_CTX 并调用 EVP_EncryptInit_ex 配置 EVP_CIPHER
+	// cctx 是 EVP_CIPHER_CTX
+	cctx, err := crypto.NewEncryptionCipherCtx(cipher, nil, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create encryption cipher ctx %w", err)
+	}
+
+	if len(iv) > 0 {
+		if mode == crypto.CipherModeGCM || mode == crypto.CipherModeCCM {
+			err := cctx.SetCtrl(C.EVP_CTRL_AEAD_SET_IVLEN, len(iv))
+			if err != nil {
+				return nil, fmt.Errorf("could not set IV len to %d: %w", len(iv), err)
+			}
+		}
+	}
+
+	// 此时 key 和 iv 还没有被设置到 cctx 中，先设置在 sm4Encrypter 中
+	return &sm4Encrypter{cctx: cctx, tagLen: tagLen, key: key, iv: iv, aad: nil}, nil
+}
+
+// 获取加密生成的 tag
+func (ctx *sm4Encrypter) GetTag() ([]byte, error) {
+	tag, err := ctx.cctx.GetCtrlBytes(C.EVP_CTRL_AEAD_GET_TAG, ctx.tagLen, ctx.tagLen)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tag: %w", err)
+	}
+
+	return tag, nil
+}
+
+// 设置 tag 长度,GCM应为16,CCM应为12
+func (ctx *sm4Encrypter) SetTagLen(length int) {
+	ctx.tagLen = length
+}
+
+func (ctx *sm4Encrypter) SetAAD(aad []byte) {
+	ctx.aad = aad
+}
+
+func (ctx *sm4Encrypter) EncryptAll(src []byte) ([]byte, error) {
+	isCcm := (C.EVP_CIPHER_flags(C.X_EVP_CIPHER_CTX_cipher((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()))) & C.EVP_CIPH_MODE) ==
+		C.EVP_CIPH_CCM_MODE
+
+	if isCcm {
+		// 设置 CCM 模式的 tag 长度
+		err := ctx.cctx.SetCtrl(C.EVP_CTRL_AEAD_SET_TAG, ctx.tagLen)
+		if err != nil {
+			return nil, fmt.Errorf("failed to set CCM tag: %w", err)
+		}
+	}
+	// 加密时才把 sm4Encrypter 中的 key 和 iv 设置到 cctx 中
+	err := ctx.cctx.SetKeyAndIV(ctx.key, ctx.iv)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set key or iv: %w", err)
+	}
+
+	var tmplen C.int
+	// 如果有附加信息 aad，调用 EVP_EncryptUpdate 设置 aad
+	if ctx.aad != nil {
+		if isCcm {
+			res := C.EVP_EncryptUpdate((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()), nil, &tmplen, nil, C.int(len(src)))
+			if res != 1 {
+				return nil, fmt.Errorf("failed to set CCM plain text length: %w", crypto.PopError())
+			}
+		}
+
+		// 独立于常规EncryptUpdate用法的AAD设置，它的输出可以是nil
+		// 所以这里直接用了，没有封装成cctx.EncryptUpdate
+		res := C.EVP_EncryptUpdate((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()), nil, &tmplen, (*C.uchar)(&ctx.aad[0]),
+			C.int(len(ctx.aad)))
+		if res != 1 {
+			return nil, fmt.Errorf("failed to set AAD: %w", crypto.PopError())
+		}
+	}
+
+	// 调用 EVP_EncryptUpdate 将 src 中的数据加到待加密数据中
+	// 并获得到加密后的数据【大部分】
+	res := new(bytes.Buffer)
+	buf, err := ctx.cctx.EncryptUpdate(src)
+	if err != nil {
+		return nil, fmt.Errorf("failed to perform encryption: %w", err)
+	}
+	res.Write(buf)
+
+	// 调用 EVP_EncryptFinal 完成加密并获取到最后一部分包括了 padding 的加密数据
+	buf2, err := ctx.cctx.EncryptFinal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to finalize encryption: %w", err)
+	}
+	res.Write(buf2)
+
+	return res.Bytes(), nil
+}
+
+// 是否启用自动 padding，默认都是启用的
+func (ctx *sm4Encrypter) SetPadding(pad bool) {
+	ctx.cctx.SetPadding(pad)
+}
+
+func (b *Block) Decrypt(dst, src []byte) {
+	sm4.Decrypt(dst, src, b.key)
+}

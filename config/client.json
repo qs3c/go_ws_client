@@ -1,0 +1,8 @@
+{
+    "operationID": "1764923222622312981",
+    "sendID": "2800935371",
+    "receiveID": "6743113909",
+    "senderNickname": "chenshaobo",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVc2VySUQiOiIyODAwOTM1MzcxIiwiUGxhdGZvcm1JRCI6NSwiZXhwIjoxNzcyNzAxMjI4LCJpYXQiOjE3NjQ5MjUyMjN9.74_BGPl_T8_x09Wcfjv2O7DnkocVYQ2pHL10ltuXjnM",
+    "serverAddr": "ws://192.168.1.72:10001/"
+}

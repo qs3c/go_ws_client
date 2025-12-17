@@ -1,0 +1,19 @@
+module github.com/albert/ws_client
+
+go 1.24.6
+
+require (
+	github.com/google/go-cmp v0.7.0
+	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.1
+	github.com/openimsdk/protocol v0.0.73-alpha.14
+	github.com/openimsdk/tools v0.0.49
+	github.com/stretchr/testify v1.11.1
+	google.golang.org/protobuf v1.36.10
+)
+
+require (
+	github.com/pkg/errors v0.9.1 // indirect
+	golang.org/x/net v0.29.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
