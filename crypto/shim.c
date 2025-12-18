@@ -22,6 +22,7 @@
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
+#include <openssl/bn.h>
 
 #include "_cgo_export.h"
 
@@ -35,12 +36,12 @@
 // 	return go_write_bio_write(b, (char*)str, (int)strlen(str));
 // }
 
-const EVP_MD *X_EVP_sm3() {
-	return EVP_sm3();
-}
+// const EVP_MD *X_EVP_sm3() {
+// 	return EVP_sm3();
+// }
 
-const int X_ED25519_SUPPORT = 1;
-int X_EVP_PKEY_ED25519 = EVP_PKEY_ED25519;
+// const int X_ED25519_SUPPORT = 1;
+// int X_EVP_PKEY_ED25519 = EVP_PKEY_ED25519;
 
 int X_EVP_Digest(const void *data, size_t count,
 		unsigned char *md, unsigned int *size,

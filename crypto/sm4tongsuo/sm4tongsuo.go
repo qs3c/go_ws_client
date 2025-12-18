@@ -9,9 +9,7 @@ import "C"
 
 import (
 	"bytes"
-	"crypto/cipher"
 	"fmt"
-	"unsafe"
 
 	"github.com/albert/ws_client/crypto"
 
@@ -55,49 +53,49 @@ type sm4Decrypter struct {
 	tag  []byte
 }
 
-type sm4Cipher struct {
-	rk [32]uint32
-}
+// type sm4Cipher struct {
+// 	rk [32]uint32
+// }
 
-func (c *sm4Cipher) BlockSize() int {
-	return BlockSize
-}
+// func (c *sm4Cipher) BlockSize() int {
+// 	return BlockSize
+// }
 
-func NewCipher(key []byte) (cipher.Block, error) {
-	if len(key) != KeySize {
-		return nil, fmt.Errorf("invalid key size: %w", crypto.ErrInvalidKeySize)
-	}
+// func NewCipher(key []byte) (cipher.Block, error) {
+// 	if len(key) != KeySize {
+// 		return nil, fmt.Errorf("invalid key size: %w", crypto.ErrInvalidKeySize)
+// 	}
 
-	cipher := &sm4Cipher{}
-	ret := C.SM4_set_key((*C.uchar)(&key[0]), (*C.SM4_KEY)(unsafe.Pointer(&cipher.rk)))
-	if ret != 1 {
-		return nil, fmt.Errorf("failed to set key: %w", crypto.ErrInternalError)
-	}
+// 	cipher := &sm4Cipher{}
+// 	ret := C.SM4_set_key((*C.uchar)(&key[0]), (*C.SM4_KEY)(unsafe.Pointer(&cipher.rk)))
+// 	if ret != 1 {
+// 		return nil, fmt.Errorf("failed to set key: %w", crypto.ErrInternalError)
+// 	}
 
-	return cipher, nil
-}
+// 	return cipher, nil
+// }
 
-func (c *sm4Cipher) Encrypt(dst, src []byte) {
-	if len(src) < BlockSize {
-		panic("sm4: input not full block")
-	}
-	if len(dst) < BlockSize {
-		panic("sm4: output not full block")
-	}
+// func (c *sm4Cipher) Encrypt(dst, src []byte) {
+// 	if len(src) < BlockSize {
+// 		panic("sm4: input not full block")
+// 	}
+// 	if len(dst) < BlockSize {
+// 		panic("sm4: output not full block")
+// 	}
 
-	C.SM4_encrypt((*C.uchar)(&src[0]), (*C.uchar)(&dst[0]), (*C.SM4_KEY)(unsafe.Pointer(&c.rk)))
-}
+// 	C.SM4_encrypt((*C.uchar)(&src[0]), (*C.uchar)(&dst[0]), (*C.SM4_KEY)(unsafe.Pointer(&c.rk)))
+// }
 
-func (c *sm4Cipher) Decrypt(dst, src []byte) {
-	if len(src) < BlockSize {
-		panic("sm4: input not full block")
-	}
-	if len(dst) < BlockSize {
-		panic("sm4: output not full block")
-	}
+// func (c *sm4Cipher) Decrypt(dst, src []byte) {
+// 	if len(src) < BlockSize {
+// 		panic("sm4: input not full block")
+// 	}
+// 	if len(dst) < BlockSize {
+// 		panic("sm4: output not full block")
+// 	}
 
-	C.SM4_decrypt((*C.uchar)(&src[0]), (*C.uchar)(&dst[0]), (*C.SM4_KEY)(unsafe.Pointer(&c.rk)))
-}
+// 	C.SM4_decrypt((*C.uchar)(&src[0]), (*C.uchar)(&dst[0]), (*C.SM4_KEY)(unsafe.Pointer(&c.rk)))
+// }
 
 func getSM4Cipher(mode int) (*crypto.Cipher, error) {
 
@@ -180,7 +178,7 @@ func (ctx *sm4Decrypter) DecryptAll(src []byte) ([]byte, error) {
 
 	var tmplen C.int
 	if ctx.aad != nil {
-		isCcm := (C.EVP_CIPHER_flags(C.X_EVP_CIPHER_CTX_cipher((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()))) &
+		isCcm := (C.EVP_CIPHER_flags(C.EVP_CIPHER_CTX_cipher((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()))) &
 			C.EVP_CIPH_MODE) == C.EVP_CIPH_CCM_MODE
 
 		if isCcm {
@@ -275,7 +273,7 @@ func (ctx *sm4Encrypter) SetAAD(aad []byte) {
 }
 
 func (ctx *sm4Encrypter) EncryptAll(src []byte) ([]byte, error) {
-	isCcm := (C.EVP_CIPHER_flags(C.X_EVP_CIPHER_CTX_cipher((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()))) & C.EVP_CIPH_MODE) ==
+	isCcm := (C.EVP_CIPHER_flags(C.EVP_CIPHER_CTX_cipher((*C.EVP_CIPHER_CTX)(ctx.cctx.Ctx()))) & C.EVP_CIPH_MODE) ==
 		C.EVP_CIPH_CCM_MODE
 
 	if isCcm {

@@ -22,13 +22,13 @@ import (
 
 // 基于 sm4Encrypter 和 sm4Decrypter 实现 aead 接口 【其实不实现也可以的】
 
-type aead interface {
+type AEAD interface {
 	cipher.AEAD
 
 	// explicitNonceLen returns the number of bytes of explicit nonce
 	// included in each record. This is eight for older AEADs and
 	// zero for modern ones.
-	explicitNonceLen() int
+	ExplicitNonceLen() int
 }
 
 func NewSm4AEADCipher(key, iv []byte, isEncrypt bool) cipher.AEAD {
@@ -91,7 +91,7 @@ func (e *sm4AEADEncrypter) Overhead() int {
 }
 
 // 返回需要显示传输的 nonce 长度
-func (e *sm4AEADEncrypter) explicitNonceLen() int {
+func (e *sm4AEADEncrypter) ExplicitNonceLen() int {
 	// 如果没有使用特别的技术，需要显示传输的 nonce 长度就是原本的 iv 长度
 	return e.NonceSize()
 }

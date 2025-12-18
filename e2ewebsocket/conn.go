@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/albert/ws_client/crypto/sm4tongsuo"
 	"github.com/gorilla/websocket"
 )
 
@@ -35,6 +36,8 @@ type Conn struct {
 	rawInput bytes.Buffer
 	input    bytes.Reader
 	hand     bytes.Buffer
+
+	config *Config
 }
 
 // websocket.Conn 没有实现 net.Conn 接口
@@ -97,14 +100,6 @@ func (c *Conn) Read(b []byte) (int, error) {
 	return n, nil
 }
 
-func (c *Conn) readRecord() error {
-	return c.readRecordOrCCS(false)
-}
-
-func (c *Conn) readChangeCipherSpec() error {
-	return c.readRecordOrCCS(true)
-}
-
 //readRecordOrCCS 从连接中读取一个或多个 TLS 记录，并更新记录层状态。一些不变条件：
 // - c.in 必须已加锁
 // - c.input 必须为空
@@ -114,7 +109,7 @@ func (c *Conn) readChangeCipherSpec() error {
 // - 调用 c.in.changeCipherSpec
 // - 返回错误
 
-func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
+func (c *Conn) readRecord() error {
 	// 是否已出现过 read 错误
 	if c.in.err != nil {
 		return c.in.err
@@ -186,25 +181,16 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		if !handshakeComplete {
 			return c.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
 		}
-		// Some OpenSSL servers send empty records in order to randomize the
-		// CBC IV. Ignore a limited number of empty records.
 		if len(data) == 0 {
 			return errors.New("empty application data record")
 		}
-		// Note that data is owned by c.rawInput, following the Next call above,
-		// to avoid copying the plaintext. This is safe because c.rawInput is
-		// not read from or written to until c.input is drained.
-		// 握手已完成，且不期望变更密码套件，且解密后的数据 data 不为空
-		// 将解密后的数据 data 设置到 c.input 中变成一个 bytes.Reader
 		c.input.Reset(data)
 
 	// 处理 TLS 握手记录
 	case recordTypeHandshake:
 		if len(data) == 0 {
-			return c.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+			return errors.New("alertUnexpectedMessage")
 		}
-		// 数据长度不为0，且不期望变更密码套件
-		// 将握手数据写入 c.hand
 		c.hand.Write(data)
 	}
 
@@ -279,6 +265,24 @@ func (c *Conn) Close() error {
 		return err
 	}
 	return alertErr
+}
+
+func (c *Conn) closeNotify() error {
+	c.out.Lock()
+	defer c.out.Unlock()
+
+	if !c.closeNotifySent {
+		// 5 秒超时时间
+		c.SetWriteDeadline(time.Now().Add(time.Second * 5))
+		// 发送 websocket.CloseMessage 关闭通知
+		c.closeNotifyErr = c.conn.WriteMessage(websocket.CloseMessage, nil)
+
+		c.closeNotifySent = true
+
+		// 后续写入都将失败
+		c.SetWriteDeadline(time.Now())
+	}
+	return c.closeNotifyErr
 }
 
 func (c *Conn) Handshake() error {
@@ -374,22 +378,53 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 	return c.handshakeErr
 }
 
-func (c *Conn) closeNotify() error {
-	c.out.Lock()
-	defer c.out.Unlock()
+func (c *Conn) handlePostHandshakeMessage() error {
 
-	if !c.closeNotifySent {
-		// 5 秒超时时间
-		c.SetWriteDeadline(time.Now().Add(time.Second * 5))
-		// 发送 websocket.CloseMessage 关闭通知
-		c.closeNotifyErr = c.conn.WriteMessage(websocket.CloseMessage, nil)
+	return c.handleRenegotiation()
 
-		c.closeNotifySent = true
+}
 
-		// 后续写入都将失败
-		c.SetWriteDeadline(time.Now())
+// Todo: 重要，涉及重协商策略以及 isClient 问题
+// 前置是需完成常规握手功能
+func (c *Conn) handleRenegotiation() error {
+
+	msg, err := c.readHandshake(nil)
+	if err != nil {
+		return err
 	}
-	return c.closeNotifyErr
+
+	helloReq, ok := msg.(*helloRequestMsg)
+	if !ok {
+		c.sendAlert(alertUnexpectedMessage)
+		return unexpectedMessageError(helloReq, msg)
+	}
+
+	if !c.isClient {
+		return c.sendAlert(alertNoRenegotiation)
+	}
+
+	switch c.config.Renegotiation {
+	case RenegotiateNever:
+		return c.sendAlert(alertNoRenegotiation)
+	case RenegotiateOnceAsClient:
+		if c.handshakes > 1 {
+			return c.sendAlert(alertNoRenegotiation)
+		}
+	case RenegotiateFreelyAsClient:
+		// Ok.
+	default:
+		c.sendAlert(alertInternalError)
+		return errors.New("tls: unknown Renegotiation value")
+	}
+
+	c.handshakeMutex.Lock()
+	defer c.handshakeMutex.Unlock()
+
+	c.isHandshakeComplete.Store(false)
+	if c.handshakeErr = c.clientHandshake(context.Background()); c.handshakeErr == nil {
+		c.handshakes++
+	}
+	return c.handshakeErr
 }
 
 // ===========================================================================
@@ -448,7 +483,7 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 		switch c := hc.cipher.(type) {
 		case cipher.Stream:
 			c.XORKeyStream(payload, payload)
-		case sm4tongsuo.aead:
+		case sm4tongsuo.AEAD:
 
 			if len(payload) < explicitNonceLen {
 				return nil, errors.New("alertBadRecordMAC")
@@ -474,26 +509,26 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 				return nil, errors.New("alertBadRecordMAC")
 			}
 		// case cbcMode:
-			// TODO:
-			// blockSize := c.BlockSize()
-			// minPayload := explicitNonceLen + roundUp(hc.mac.Size()+1, blockSize)
-			// if len(payload)%blockSize != 0 || len(payload) < minPayload {
-			// 	return nil, 0, alertBadRecordMAC
-			// }
+		// TODO:
+		// blockSize := c.BlockSize()
+		// minPayload := explicitNonceLen + roundUp(hc.mac.Size()+1, blockSize)
+		// if len(payload)%blockSize != 0 || len(payload) < minPayload {
+		// 	return nil, 0, alertBadRecordMAC
+		// }
 
-			// if explicitNonceLen > 0 {
-			// 	c.SetIV(payload[:explicitNonceLen])
-			// 	payload = payload[explicitNonceLen:]
-			// }
-			// c.CryptBlocks(payload, payload)
+		// if explicitNonceLen > 0 {
+		// 	c.SetIV(payload[:explicitNonceLen])
+		// 	payload = payload[explicitNonceLen:]
+		// }
+		// c.CryptBlocks(payload, payload)
 
-			// // In a limited attempt to protect against CBC padding oracles like
-			// // Lucky13, the data past paddingLen (which is secret) is passed to
-			// // the MAC function as extra data, to be fed into the HMAC after
-			// // computing the digest. This makes the MAC roughly constant time as
-			// // long as the digest computation is constant time and does not
-			// // affect the subsequent write, modulo cache effects.
-			// paddingLen, paddingGood = extractPadding(payload)
+		// // In a limited attempt to protect against CBC padding oracles like
+		// // Lucky13, the data past paddingLen (which is secret) is passed to
+		// // the MAC function as extra data, to be fed into the HMAC after
+		// // computing the digest. This makes the MAC roughly constant time as
+		// // long as the digest computation is constant time and does not
+		// // affect the subsequent write, modulo cache effects.
+		// paddingLen, paddingGood = extractPadding(payload)
 		default:
 			panic("unknown cipher type")
 		}
@@ -547,14 +582,14 @@ func (hc *halfConn) explicitNonceLen() int {
 	switch c := hc.cipher.(type) {
 	case cipher.Stream:
 		return 0
-	case aead:
-		return c.explicitNonceLen()
-	case cbcMode:
-		// TLS 1.1 introduced a per-record explicit IV to fix the BEAST attack.
-		if hc.version >= VersionTLS11 {
-			return c.BlockSize()
-		}
-		return 0
+	case sm4tongsuo.AEAD:
+		return c.ExplicitNonceLen()
+	// case cbcMode:
+	// 	// TLS 1.1 introduced a per-record explicit IV to fix the BEAST attack.
+	// 	if hc.version >= VersionTLS11 {
+	// 		return c.BlockSize()
+	// 	}
+	// 	return 0
 	default:
 		panic("unknown cipher type")
 	}
