@@ -1,28 +1,53 @@
 package e2ewebsocket
 
 import (
-	"crypto/x509"
-	"errors"
+	"fmt"
+
+	"github.com/albert/ws_client/sm2keyexch"
 )
 
 type keyAgreement interface {
-	// On the server side, the first two methods are called in order.
-
-	// In the case that the key agreement protocol doesn't use a
-	// ServerKeyExchange message, generateServerKeyExchange can return nil,
-	// nil.
-	generateServerKeyExchange(*Config, *Certificate, *clientHelloMsg, *serverHelloMsg) (*serverKeyExchangeMsg, error)
-	processClientKeyExchange(*Config, *Certificate, *clientKeyExchangeMsg, uint16) ([]byte, error)
-
-	// On the client side, the next two methods are called in order.
-
-	// This method may not be called if the server doesn't send a
-	// ServerKeyExchange message.
-	processServerKeyExchange(*Config, *clientHelloMsg, *serverHelloMsg, *x509.Certificate, *serverKeyExchangeMsg) error
-	generateClientKeyExchange(*Config, *clientHelloMsg, *x509.Certificate) ([]byte, *clientKeyExchangeMsg, error)
+	Prepare(remotePub *sm2keyexch.ECKey, remoteId string, initiator bool, doChecksum bool) ([]byte, error)
+	ComputeKey(remotePoint []byte, keyLen int) ([]byte, []byte, error)
 }
 
-var errClientKeyExchange = errors.New("tls: invalid ClientKeyExchange message")
-var errServerKeyExchange = errors.New("tls: invalid ServerKeyExchange message")
+type sm2KeyAgreement struct {
+	local    *sm2keyexch.ECKey
+	localId  string
+	ctxLocal *sm2keyexch.KAPCtx
+	keyLen   int
+}
 
-type sm2KeyAgreement struct{}
+func NewSM2KeyAgreement(local *sm2keyexch.ECKey, localId string, keyLen int) *sm2KeyAgreement {
+	return &sm2KeyAgreement{
+		local:    local,
+		localId:  localId,
+		ctxLocal: sm2keyexch.NewKAPCtx(),
+		keyLen:   keyLen,
+	}
+}
+
+func (k *sm2KeyAgreement) Prepare(remotePub *sm2keyexch.ECKey, remoteId string, initiator bool, doChecksum bool) ([]byte, error) {
+
+	if err := k.ctxLocal.Init(k.local, k.localId, remotePub, remoteId, initiator, doChecksum); err != nil {
+		fmt.Println("SM2 KAP failed")
+		return nil, err
+	}
+
+	RA, err := k.ctxLocal.Prepare()
+	if err != nil {
+		fmt.Println("SM2 KAP failed")
+		return nil, err
+	}
+	return RA, nil
+}
+
+func (k *sm2KeyAgreement) ComputeKey(remotePoint []byte) ([]byte, []byte, error) {
+
+	keyLocal, csLocal, err := k.ctxLocal.ComputeKey(remotePoint, k.keyLen)
+	if err != nil {
+		fmt.Println("SM2 KAP failed")
+		return nil, nil, err
+	}
+	return keyLocal, csLocal, nil
+}

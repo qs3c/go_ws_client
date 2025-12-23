@@ -2,11 +2,8 @@ package e2ewebsocket
 
 import (
 	"context"
-	"crypto/mlkem"
-	"crypto/tls/internal/fips140tls"
 	"errors"
 	"io"
-	"slices"
 )
 
 // type clientHandshakeState struct {
@@ -40,7 +37,7 @@ import (
 type handshakeState struct {
 	c            *Conn
 	ctx          context.Context
-	helloMsg     *serverHelloMsg
+	helloMsg     *helloMsg
 	suite        *cipherSuite
 	finishedHash finishedHash
 	masterSecret []byte
@@ -53,7 +50,7 @@ func (c *Conn) symHandshake(ctx context.Context) (err error) {
 	}
 
 	// 【第一大步：生成客户端 Hello】
-	hello, keyShareKeys, ech, err := c.makeHello()
+	hello, err := c.makeHello()
 	if err != nil {
 		return err
 	}
@@ -89,7 +86,7 @@ func (c *Conn) symHandshake(ctx context.Context) (err error) {
 	return hs.handshake()
 }
 
-func (c *Conn) makeHello() (*clientHelloMsg, *keySharePrivateKeys, error) {
+func (c *Conn) makeHello() (*helloMsg, error) {
 
 	config := c.config
 
@@ -97,20 +94,19 @@ func (c *Conn) makeHello() (*clientHelloMsg, *keySharePrivateKeys, error) {
 
 	supportedVersions := config.supportedVersions
 	if len(supportedVersions) == 0 {
-		return nil, nil, nil, errors.New("tls: no supported versions satisfy MinVersion and MaxVersion")
+		return nil, errors.New("tls: no supported versions satisfy MinVersion and MaxVersion")
 	}
 
 	hello := &helloMsg{
-		vers:                         version,
-		random:                       make([]byte, 32),
-		supportedCurves:              config.curvePreferences(maxVersion),
-		supportedPoints:              []uint8{pointFormatUncompressed},
-		secureRenegotiationSupported: true,
 		supportedVersions:            supportedVersions,
+		random:                       make([]byte, 32),
+		supportedCurves:              config.curvePreferences(version),
+		secureRenegotiationSupported: true,
 	}
 
+	// 重协商需包含之前的 finished 消息一起计算
 	if c.handshakes > 0 {
-		hello.secureRenegotiation = c.clientFinished[:]
+		hello.secureRenegotiation = c.localFinished[:]
 	}
 
 	// 基于硬件条件设置prefer order xx
@@ -119,6 +115,10 @@ func (c *Conn) makeHello() (*clientHelloMsg, *keySharePrivateKeys, error) {
 	// if !hasAESGCMHardwareSupport {
 	// 	preferenceOrder = cipherSuitesPreferenceOrderNoAES
 	// }
+
+	// configCipherSuites 如果没有特殊设置的话就会走默认，而默认就是 cipherSuitesPreferenceOrder
+	// 所以和 preferenceOrder 是一致的
+	// 两个套件id列表取交集然后放到 hello.cipherSuites 中
 	configCipherSuites := config.cipherSuites()
 	hello.cipherSuites = make([]uint16, 0, len(configCipherSuites))
 
@@ -127,94 +127,16 @@ func (c *Conn) makeHello() (*clientHelloMsg, *keySharePrivateKeys, error) {
 		if suite == nil {
 			continue
 		}
-		// Don't advertise TLS 1.2-only cipher suites unless
-		// we're attempting TLS 1.2.
-		if maxVersion < VersionTLS12 && suite.flags&suiteTLS12 != 0 {
-			continue
-		}
 		hello.cipherSuites = append(hello.cipherSuites, suiteId)
 	}
 
+	// 生成随机数放到 hello.random 中
 	_, err := io.ReadFull(config.rand(), hello.random)
 	if err != nil {
-		return nil, nil, nil, errors.New("tls: short read from Rand: " + err.Error())
+		return nil, errors.New("tls: short read from Rand: " + err.Error())
 	}
+	// 如果不是 tls1.3 hello 阶段无需生成 keyShareKeys
+	// 主要工作就是确定好版本，密码套件这些信息【随机值目前是否有用还不清楚感觉不太需要】
 
-	// A random session ID is used to detect when the server accepted a ticket
-	// and is resuming a session (see RFC 5077). In TLS 1.3, it's always set as
-	// a compatibility measure (see RFC 8446, Section 4.1.2).
-	//
-	// The session ID is not set for QUIC connections (see RFC 9001, Section 8.4).
-	if c.quic == nil {
-		hello.sessionId = make([]byte, 32)
-		if _, err := io.ReadFull(config.rand(), hello.sessionId); err != nil {
-			return nil, nil, nil, errors.New("tls: short read from Rand: " + err.Error())
-		}
-	}
-
-	if maxVersion >= VersionTLS12 {
-		hello.supportedSignatureAlgorithms = supportedSignatureAlgorithms()
-	}
-	if testingOnlyForceClientHelloSignatureAlgorithms != nil {
-		hello.supportedSignatureAlgorithms = testingOnlyForceClientHelloSignatureAlgorithms
-	}
-
-	var keyShareKeys *keySharePrivateKeys
-	if hello.supportedVersions[0] == VersionTLS13 {
-		// Reset the list of ciphers when the client only supports TLS 1.3.
-		if len(hello.supportedVersions) == 1 {
-			hello.cipherSuites = nil
-		}
-		if fips140tls.Required() {
-			hello.cipherSuites = append(hello.cipherSuites, defaultCipherSuitesTLS13FIPS...)
-		} else if hasAESGCMHardwareSupport {
-			hello.cipherSuites = append(hello.cipherSuites, defaultCipherSuitesTLS13...)
-		} else {
-			hello.cipherSuites = append(hello.cipherSuites, defaultCipherSuitesTLS13NoAES...)
-		}
-
-		if len(hello.supportedCurves) == 0 {
-			return nil, nil, nil, errors.New("tls: no supported elliptic curves for ECDHE")
-		}
-		curveID := hello.supportedCurves[0]
-		keyShareKeys = &keySharePrivateKeys{curveID: curveID}
-		// Note that if X25519MLKEM768 is supported, it will be first because
-		// the preference order is fixed.
-		if curveID == X25519MLKEM768 {
-			keyShareKeys.ecdhe, err = generateECDHEKey(config.rand(), X25519)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			seed := make([]byte, mlkem.SeedSize)
-			if _, err := io.ReadFull(config.rand(), seed); err != nil {
-				return nil, nil, nil, err
-			}
-			keyShareKeys.mlkem, err = mlkem.NewDecapsulationKey768(seed)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			mlkemEncapsulationKey := keyShareKeys.mlkem.EncapsulationKey().Bytes()
-			x25519EphemeralKey := keyShareKeys.ecdhe.PublicKey().Bytes()
-			hello.keyShares = []keyShare{
-				{group: X25519MLKEM768, data: append(mlkemEncapsulationKey, x25519EphemeralKey...)},
-			}
-			// If both X25519MLKEM768 and X25519 are supported, we send both key
-			// shares (as a fallback) and we reuse the same X25519 ephemeral
-			// key, as allowed by draft-ietf-tls-hybrid-design-09, Section 3.2.
-			if slices.Contains(hello.supportedCurves, X25519) {
-				hello.keyShares = append(hello.keyShares, keyShare{group: X25519, data: x25519EphemeralKey})
-			}
-		} else {
-			if _, ok := curveForCurveID(curveID); !ok {
-				return nil, nil, nil, errors.New("tls: CurvePreferences includes unsupported curve")
-			}
-			keyShareKeys.ecdhe, err = generateECDHEKey(config.rand(), curveID)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			hello.keyShares = []keyShare{{group: curveID, data: keyShareKeys.ecdhe.PublicKey().Bytes()}}
-		}
-	}
-
-	return hello, keyShareKeys, nil
+	return hello, nil
 }

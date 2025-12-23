@@ -69,7 +69,9 @@ func (e *sm4AEADEncrypter) Seal(dst, nonce, plaintext, aad []byte) []byte {
 		return nil
 	}
 
-	return append(ciphertext, tag...)
+	ciphertext = append(ciphertext, tag...)
+	dst = append(dst, ciphertext...)
+	return dst
 }
 
 func (e *sm4AEADEncrypter) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error) {

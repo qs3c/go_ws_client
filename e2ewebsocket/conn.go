@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -38,6 +39,9 @@ type Conn struct {
 	hand     bytes.Buffer
 
 	config *Config
+
+	localFinished  [12]byte
+	remoteFinished [12]byte
 }
 
 // websocket.Conn 没有实现 net.Conn 接口
@@ -427,6 +431,76 @@ func (c *Conn) handleRenegotiation() error {
 	return c.handshakeErr
 }
 
+func (c *Conn) writeHandshakeRecord(msg handshakeMessage, transcript transcriptHash) (int, error) {
+	c.out.Lock()
+	defer c.out.Unlock()
+
+	data, err := msg.marshal()
+	if err != nil {
+		return 0, err
+	}
+	if transcript != nil {
+		transcript.Write(data)
+	}
+
+	return c.writeRecordLocked(recordTypeHandshake, data)
+}
+
+var outBufPool = sync.Pool{
+	New: func() any {
+		return new([]byte)
+	},
+}
+
+func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, errors.New("zero length write")
+	}
+
+	outBufPtr := outBufPool.Get().(*[]byte)
+	outBuf := *outBufPtr
+	defer func() {
+		// You might be tempted to simplify this by just passing &outBuf to Put,
+		// but that would make the local copy of the outBuf slice header escape
+		// to the heap, causing an allocation. Instead, we keep around the
+		// pointer to the slice header returned by Get, which is already on the
+		// heap, and overwrite and return that.
+		*outBufPtr = outBuf
+		outBufPool.Put(outBufPtr)
+	}()
+
+	// 注意 这里！ 因为原来是流式的所以如果数据很大可以分开写好几次
+	// 但是现在是应用层的，能分开写好几次么，似乎不用管这个问题（应该内部会做处理）
+	// ok 问了gemini 确实不需要！
+
+	outBuf[0] = byte(typ)
+
+	var err error
+	outBuf, err = c.out.encrypt(outBuf, data, c.config.rand())
+	if err != nil {
+		return 0, err
+	}
+	err = c.conn.WriteMessage(websocket.BinaryMessage, data)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(data), nil
+}
+
+func (c *Conn) write(data []byte) (int, error) {
+	// if c.buffering {
+	// 	c.sendBuf = append(c.sendBuf, data...)
+	// 	return len(data), nil
+	// }
+	err := c.conn.WriteMessage(websocket.BinaryMessage, data)
+	if err != nil {
+		return 0, err
+	}
+	// c.bytesSent += int64(n)
+	return len(data), nil
+}
+
 // ===========================================================================
 
 func (c *Conn) LocalAddr() net.Addr {
@@ -467,6 +541,8 @@ type halfConn struct {
 	nextMac    hash.Hash // next MAC algorithm
 
 }
+
+// =======================================================
 
 func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 
@@ -571,6 +647,74 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
+func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, error) {
+	if hc.cipher == nil {
+		return append(record, payload...), nil
+	}
+
+	var explicitNonce []byte
+	if explicitNonceLen := hc.explicitNonceLen(); explicitNonceLen > 0 {
+		record, explicitNonce = sliceForAppend(record, explicitNonceLen)
+		if _, isCBC := hc.cipher.(cbcMode); !isCBC && explicitNonceLen < 16 {
+			// The AES-GCM construction in TLS has an explicit nonce so that the
+			// nonce can be random. However, the nonce is only 8 bytes which is
+			// too small for a secure, random nonce. Therefore we use the
+			// sequence number as the nonce. The 3DES-CBC construction also has
+			// an 8 bytes nonce but its nonces must be unpredictable (see RFC
+			// 5246, Appendix F.3), forcing us to use randomness. That's not
+			// 3DES' biggest problem anyway because the birthday bound on block
+			// collision is reached first due to its similarly small block size
+			// (see the Sweet32 attack).
+			copy(explicitNonce, hc.seq[:])
+		} else {
+			if _, err := io.ReadFull(rand, explicitNonce); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	switch c := hc.cipher.(type) {
+	// case cipher.Stream:
+	// 	mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
+	// 	record, dst = sliceForAppend(record, len(payload)+len(mac))
+	// 	c.XORKeyStream(dst[:len(payload)], payload)
+	// 	c.XORKeyStream(dst[len(payload):], mac)
+	case sm4tongsuo.AEAD:
+		nonce := explicitNonce
+		if len(nonce) == 0 {
+			nonce = hc.seq[:]
+		}
+		additionalData := append(hc.scratchBuf[:0], hc.seq[:]...)
+		// additionalData = append(additionalData,record[:1]...)
+		additionalData = append(additionalData, byte(len(payload)>>8), byte(len(payload)))
+		record = c.Seal(record, nonce, payload, additionalData)
+
+	// case cbcMode:
+	// 	mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
+	// 	blockSize := c.BlockSize()
+	// 	plaintextLen := len(payload) + len(mac)
+	// 	paddingLen := blockSize - plaintextLen%blockSize
+	// 	record, dst = sliceForAppend(record, plaintextLen+paddingLen)
+	// 	copy(dst, payload)
+	// 	copy(dst[len(payload):], mac)
+	// 	for i := plaintextLen; i < len(dst); i++ {
+	// 		dst[i] = byte(paddingLen - 1)
+	// 	}
+	// 	if len(explicitNonce) > 0 {
+	// 		c.SetIV(explicitNonce)
+	// 	}
+	// 	c.CryptBlocks(dst, dst)
+	default:
+		panic("unknown cipher type")
+	}
+
+	// Update length to include nonce, MAC and any block padding needed.
+	hc.incSeq()
+
+	return record, nil
+}
+
+// =======================================================
 func (hc *halfConn) explicitNonceLen() int {
 	if hc.cipher == nil {
 		return 0
