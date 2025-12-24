@@ -3,6 +3,7 @@ package e2ewebsocket
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -66,13 +67,13 @@ func (c *Conn) symHandshake(ctx context.Context) (err error) {
 		return err
 	}
 
-	serverHello, ok := msg.(*serverHelloMsg)
+	remoteHello, ok := msg.(*helloMsg)
 	if !ok {
-		c.sendAlert(alertUnexpectedMessage)
-		return unexpectedMessageError(serverHello, msg)
+		c.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		return errors.New("unexpectedMessageError")
 	}
 
-	if err := c.pickE2EVersion(serverHello); err != nil {
+	if err := c.pickE2EVersion(remoteHello); err != nil {
 		return err
 	}
 
@@ -133,10 +134,25 @@ func (c *Conn) makeHello() (*helloMsg, error) {
 	// 生成随机数放到 hello.random 中
 	_, err := io.ReadFull(config.rand(), hello.random)
 	if err != nil {
-		return nil, errors.New("tls: short read from Rand: " + err.Error())
+		return nil, errors.New("short read from Rand: " + err.Error())
 	}
 	// 如果不是 tls1.3 hello 阶段无需生成 keyShareKeys
 	// 主要工作就是确定好版本，密码套件这些信息【随机值目前是否有用还不清楚感觉不太需要】
 
 	return hello, nil
+}
+
+func (c *Conn) pickE2EVersion(remoteHello *helloMsg) error {
+	vers, ok := c.config.mutualVersion(remoteHello.supportedVersions)
+	if !ok {
+		c.out.setErrorLocked(errors.New("alertProtocolVersion"))
+		return fmt.Errorf("tls: server selected unsupported protocol version")
+	}
+
+	c.vers = vers
+	c.haveVers = true
+	c.in.version = vers
+	c.out.version = vers
+
+	return nil
 }

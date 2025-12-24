@@ -9,6 +9,7 @@ import (
 
 const (
 	maxPlaintext = 16384
+	maxHandshake = 65536
 )
 
 // signaling cipher suite values
@@ -16,7 +17,7 @@ const (
 	scsvRenegotiation uint16 = 0x00ff
 )
 
-// handshake message types.
+// 握手消息类型
 const (
 	typeHelloRequest uint8 = 0
 	typeHelloMsg     uint8 = 1
@@ -93,6 +94,16 @@ const (
 	// SM2MLKEM768 CurveID = 4589
 )
 
+const (
+	VersionE2E1 = 0x0301
+	VersionE2E2 = 0x0302
+)
+
+var supportedVersions = []uint16{
+	VersionE2E1,
+	VersionE2E2,
+}
+
 type Config struct {
 	Version uint16
 
@@ -154,6 +165,14 @@ func (c *Config) rand() io.Reader {
 		return rand.Reader
 	}
 	return r
+}
+
+func (c *Config) mutualVersion(peerVersions []uint16) (uint16, bool) {
+	pickedVersion := Intersection(c.supportedVersions, peerVersions)
+	if peerVersions == nil {
+		return 0, false
+	}
+	return pickedVersion, true
 }
 
 type handshakeMessage interface {

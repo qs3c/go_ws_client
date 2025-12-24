@@ -211,3 +211,7 @@ func addBytesWithLength(b *cryptobyte.Builder, v []byte, n int) {
 func readUint8LengthPrefixed(s *cryptobyte.String, out *[]byte) bool {
 	return s.ReadUint8LengthPrefixed((*cryptobyte.String)(out))
 }
+
+type transcriptHash interface {
+	Write([]byte) (int, error)
+}

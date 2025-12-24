@@ -21,6 +21,8 @@ import (
 type Conn struct {
 	conn websocket.Conn
 
+	vers string
+
 	activeCall atomic.Int32
 
 	closeNotifyErr  error
@@ -34,9 +36,8 @@ type Conn struct {
 
 	in, out halfConn
 
-	rawInput bytes.Buffer
-	input    bytes.Reader
-	hand     bytes.Buffer
+	input bytes.Reader
+	hand  bytes.Buffer
 
 	config *Config
 
@@ -95,11 +96,6 @@ func (c *Conn) Read(b []byte) (int, error) {
 	// 当读取完所有应用数据且下一个记录是 close-notify 时
 	// 立即返回 io.EOF 而不是 nil
 	// 这样 HTTP 客户端就能正确感知连接已关闭，避免重用无效连接
-	if n != 0 && c.input.Len() == 0 && c.rawInput.Len() > 0 && recordType(c.rawInput.Bytes()[0]) == recordTypeAlert {
-		if err := c.readRecord(); err != nil {
-			return n, err // will be io.EOF on closeNotify
-		}
-	}
 
 	return n, nil
 }
@@ -201,6 +197,61 @@ func (c *Conn) readRecord() error {
 	return nil
 }
 
+func (c *Conn) readHandshake(transcript transcriptHash) (any, error) {
+	// 要求 hand 中至少有 4 字节数据，否则内部通过 readRecord() 读取到 hand 中
+	if err := c.readHandshakeBytes(4); err != nil {
+		return nil, err
+	}
+	data := c.hand.Bytes()
+
+	maxHandshakeSize := maxHandshake
+
+	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
+	if n > maxHandshakeSize {
+		c.out.setErrorLocked(errors.New("alertInternalError"))
+		return nil, c.in.setErrorLocked(fmt.Errorf("tls: handshake message of length %d bytes exceeds maximum of %d bytes", n, maxHandshakeSize))
+	}
+	if err := c.readHandshakeBytes(4 + n); err != nil {
+		return nil, err
+	}
+	data = c.hand.Next(4 + n)
+	return c.unmarshalHandshakeMessage(data, transcript)
+}
+
+func (c *Conn) unmarshalHandshakeMessage(data []byte, transcript transcriptHash) (handshakeMessage, error) {
+	var m handshakeMessage
+	switch data[0] {
+	case typeHelloMsg:
+		m = new(helloMsg)
+	default:
+		return nil, c.in.setErrorLocked(c.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
+	}
+
+	// 因为这里的原 data 其实来自 hand 缓冲区，所以为了不破坏 hand 缓冲区
+	// 进行了一次非常地道的深拷贝
+	data = append([]byte(nil), data...)
+
+	if !m.unmarshal(data) {
+		return nil, c.in.setErrorLocked(c.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
+	}
+
+	if transcript != nil {
+		transcript.Write(data)
+	}
+
+	return m, nil
+}
+
+// readHandshakeBytes reads handshake data until c.hand contains at least n bytes.
+func (c *Conn) readHandshakeBytes(n int) error {
+	for c.hand.Len() < n {
+		if err := c.readRecord(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *Conn) Write(b []byte) (n int, err error) {
 	// 通过 activeCall 检查连接是否已关闭
 	for {
@@ -235,8 +286,81 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		return 0, errors.New("errShutdown")
 	}
 
-	n, err := c.writeRecordLocked(recordTypeApplicationData, b)
+	n, err = c.writeRecordLocked(recordTypeApplicationData, b)
 	return n, c.out.setErrorLocked(err)
+}
+
+func (c *Conn) writeHandshakeRecord(msg handshakeMessage, transcript transcriptHash) (int, error) {
+	c.out.Lock()
+	defer c.out.Unlock()
+
+	data, err := msg.marshal()
+	if err != nil {
+		return 0, err
+	}
+	if transcript != nil {
+		transcript.Write(data)
+	}
+
+	// 不论是写入握手消息还是应用消息，writeRecordLocked 前上 out 锁
+	// writeRecordLocked 内部都会调用 out 加密
+	return c.writeRecordLocked(recordTypeHandshake, data)
+}
+
+var outBufPool = sync.Pool{
+	New: func() any {
+		return new([]byte)
+	},
+}
+
+// writeRecordLocked 写入记录，这里的 type 只能是握手或者应用了
+func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, errors.New("zero length write")
+	}
+
+	outBufPtr := outBufPool.Get().(*[]byte)
+	outBuf := *outBufPtr
+	defer func() {
+		// You might be tempted to simplify this by just passing &outBuf to Put,
+		// but that would make the local copy of the outBuf slice header escape
+		// to the heap, causing an allocation. Instead, we keep around the
+		// pointer to the slice header returned by Get, which is already on the
+		// heap, and overwrite and return that.
+		*outBufPtr = outBuf
+		outBufPool.Put(outBufPtr)
+	}()
+
+	// 注意 这里！ 因为原来是流式的所以如果数据很大可以分开写好几次
+	// 但是现在是应用层的，能分开写好几次么，似乎不用管这个问题（应该内部会做处理）
+	// ok 问了gemini 确实不需要！
+
+	outBuf[0] = byte(typ)
+
+	var err error
+	outBuf, err = c.out.encrypt(outBuf, data, c.config.rand())
+	if err != nil {
+		return 0, err
+	}
+	err = c.conn.WriteMessage(websocket.BinaryMessage, outBuf)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(data), nil
+}
+
+func (c *Conn) write(data []byte) (int, error) {
+	// if c.buffering {
+	// 	c.sendBuf = append(c.sendBuf, data...)
+	// 	return len(data), nil
+	// }
+	err := c.conn.WriteMessage(websocket.BinaryMessage, data)
+	if err != nil {
+		return 0, err
+	}
+	// c.bytesSent += int64(n)
+	return len(data), nil
 }
 
 func (c *Conn) Close() error {
@@ -360,6 +484,9 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 	}
 
 	// 给 c.in 加锁，确保在握手过程中不会被其他 goroutine 访问
+	// 握手过程涉及读写，加 in 锁是因为，read 和 write 上锁设计不同
+	// 小 write 函数内部细粒度上锁，但是小 read 函数的不会上锁，所以都是在外部先上锁
+	// 比如在这里进入握手状态机前，比如在大 Read 中上锁
 	c.in.Lock()
 	defer c.in.Unlock()
 	// 【第四大步：执行握手】
@@ -429,76 +556,6 @@ func (c *Conn) handleRenegotiation() error {
 		c.handshakes++
 	}
 	return c.handshakeErr
-}
-
-func (c *Conn) writeHandshakeRecord(msg handshakeMessage, transcript transcriptHash) (int, error) {
-	c.out.Lock()
-	defer c.out.Unlock()
-
-	data, err := msg.marshal()
-	if err != nil {
-		return 0, err
-	}
-	if transcript != nil {
-		transcript.Write(data)
-	}
-
-	return c.writeRecordLocked(recordTypeHandshake, data)
-}
-
-var outBufPool = sync.Pool{
-	New: func() any {
-		return new([]byte)
-	},
-}
-
-func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
-	if len(data) == 0 {
-		return 0, errors.New("zero length write")
-	}
-
-	outBufPtr := outBufPool.Get().(*[]byte)
-	outBuf := *outBufPtr
-	defer func() {
-		// You might be tempted to simplify this by just passing &outBuf to Put,
-		// but that would make the local copy of the outBuf slice header escape
-		// to the heap, causing an allocation. Instead, we keep around the
-		// pointer to the slice header returned by Get, which is already on the
-		// heap, and overwrite and return that.
-		*outBufPtr = outBuf
-		outBufPool.Put(outBufPtr)
-	}()
-
-	// 注意 这里！ 因为原来是流式的所以如果数据很大可以分开写好几次
-	// 但是现在是应用层的，能分开写好几次么，似乎不用管这个问题（应该内部会做处理）
-	// ok 问了gemini 确实不需要！
-
-	outBuf[0] = byte(typ)
-
-	var err error
-	outBuf, err = c.out.encrypt(outBuf, data, c.config.rand())
-	if err != nil {
-		return 0, err
-	}
-	err = c.conn.WriteMessage(websocket.BinaryMessage, data)
-	if err != nil {
-		return 0, err
-	}
-
-	return len(data), nil
-}
-
-func (c *Conn) write(data []byte) (int, error) {
-	// if c.buffering {
-	// 	c.sendBuf = append(c.sendBuf, data...)
-	// 	return len(data), nil
-	// }
-	err := c.conn.WriteMessage(websocket.BinaryMessage, data)
-	if err != nil {
-		return 0, err
-	}
-	// c.bytesSent += int64(n)
-	return len(data), nil
 }
 
 // ===========================================================================
@@ -679,7 +736,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 	// 	record, dst = sliceForAppend(record, len(payload)+len(mac))
 	// 	c.XORKeyStream(dst[:len(payload)], payload)
 	// 	c.XORKeyStream(dst[len(payload):], mac)
-	case sm4tongsuo.AEAD:
+	case aead:
 		nonce := explicitNonce
 		if len(nonce) == 0 {
 			nonce = hc.seq[:]
