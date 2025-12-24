@@ -175,6 +175,10 @@ func (c *Config) mutualVersion(peerVersions []uint16) (uint16, bool) {
 	return pickedVersion, true
 }
 
+func (c *Config) defaultSupportedVersions() []uint16 {
+	return supportedVersions
+}
+
 type handshakeMessage interface {
 	marshal() ([]byte, error)
 	unmarshal([]byte) bool

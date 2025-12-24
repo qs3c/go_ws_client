@@ -21,7 +21,7 @@ import (
 type Conn struct {
 	conn websocket.Conn
 
-	vers string
+	vers uint16
 
 	activeCall atomic.Int32
 

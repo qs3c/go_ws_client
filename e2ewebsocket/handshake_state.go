@@ -36,12 +36,13 @@ import (
 // }
 
 type handshakeState struct {
-	c            *Conn
-	ctx          context.Context
-	helloMsg     *helloMsg
-	suite        *cipherSuite
-	finishedHash finishedHash
-	masterSecret []byte
+	c              *Conn
+	ctx            context.Context
+	helloMsg       *helloMsg
+	remoteHelloMsg *helloMsg
+	suite          *cipherSuite
+	finishedHash   finishedHash
+	masterSecret   []byte
 }
 
 func (c *Conn) symHandshake(ctx context.Context) (err error) {
@@ -78,11 +79,10 @@ func (c *Conn) symHandshake(ctx context.Context) (err error) {
 	}
 
 	hs := &handshakeState{
-		c:           c,
-		ctx:         ctx,
-		serverHello: serverHello,
-		hello:       hello,
-		session:     session,
+		c:              c,
+		ctx:            ctx,
+		helloMsg:       hello,
+		remoteHelloMsg: remoteHello,
 	}
 	return hs.handshake()
 }
@@ -92,14 +92,17 @@ func (c *Conn) makeHello() (*helloMsg, error) {
 	config := c.config
 
 	version := config.Version
+	// 可通过 config 设置，没设置走默认
+	if config.supportedVersions == nil {
+		config.supportedVersions = config.defaultSupportedVersions()
+	}
 
-	supportedVersions := config.supportedVersions
-	if len(supportedVersions) == 0 {
+	if len(config.supportedVersions) == 0 {
 		return nil, errors.New("tls: no supported versions satisfy MinVersion and MaxVersion")
 	}
 
 	hello := &helloMsg{
-		supportedVersions:            supportedVersions,
+		supportedVersions:            config.supportedVersions,
 		random:                       make([]byte, 32),
 		supportedCurves:              config.curvePreferences(version),
 		secureRenegotiationSupported: true,
@@ -150,7 +153,6 @@ func (c *Conn) pickE2EVersion(remoteHello *helloMsg) error {
 	}
 
 	c.vers = vers
-	c.haveVers = true
 	c.in.version = vers
 	c.out.version = vers
 
