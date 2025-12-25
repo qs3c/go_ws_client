@@ -1,9 +1,13 @@
 package e2ewebsocket
 
 import (
+	"bytes"
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"hash"
+	"internal/byteorder"
 	"io"
 )
 
@@ -84,6 +88,8 @@ func (c *Conn) symHandshake(ctx context.Context) (err error) {
 		helloMsg:       hello,
 		remoteHelloMsg: remoteHello,
 	}
+	// 把自己构建发送的 hello 消息和接收的对端 hello 消息都挂在了 hs 上
+	// 供后续 handshake 时 processHello 使用
 	return hs.handshake()
 }
 
@@ -127,7 +133,7 @@ func (c *Conn) makeHello() (*helloMsg, error) {
 	hello.cipherSuites = make([]uint16, 0, len(configCipherSuites))
 
 	for _, suiteId := range preferenceOrder {
-		suite := mutualCipherSuite(configCipherSuites, suiteId)
+		suite := mutualCipherSuiteOld(configCipherSuites, suiteId)
 		if suite == nil {
 			continue
 		}
@@ -156,5 +162,199 @@ func (c *Conn) pickE2EVersion(remoteHello *helloMsg) error {
 	c.in.version = vers
 	c.out.version = vers
 
+	return nil
+}
+
+func (hs *handshakeState) handshake() error {
+	c := hs.c
+
+	err := hs.processHello()
+	if err != nil {
+		return err
+	}
+
+	hs.finishedHash = newFinishedHash(hs.suite)
+
+	if err := transcriptMsg(hs.helloMsg, &hs.finishedHash); err != nil {
+		return err
+	}
+	if err := transcriptMsg(hs.remoteHelloMsg, &hs.finishedHash); err != nil {
+		return err
+	}
+
+	if err := hs.doFullHandshake(); err != nil {
+		return err
+	}
+	if err := hs.establishKeys(); err != nil {
+		return err
+	}
+	if err := hs.sendFinished(c.clientFinished[:]); err != nil {
+		return err
+	}
+
+	// if _, err := c.flush(); err != nil {
+	// 	return err
+	// }
+
+	// c.clientFinishedIsFirst = true
+	// if err := hs.readSessionTicket(); err != nil {
+	// 	return err
+	// }
+
+	if err := hs.readFinished(c.remoteFinished[:]); err != nil {
+		return err
+	}
+
+	c.isHandshakeComplete.Store(true)
+
+	return nil
+}
+
+func (hs *handshakeState) processHello() error {
+	c := hs.c
+
+	if err := hs.pickCipherSuite(); err != nil {
+		return err
+	}
+
+	if c.handshakes == 0 && hs.remoteHelloMsg.secureRenegotiationSupported {
+		c.secureRenegotiation = true
+		if len(hs.remoteHelloMsg.secureRenegotiation) != 0 {
+			return c.out.setErrorLocked(errors.New("tls: initial handshake had non-empty renegotiation extension"))
+		}
+	}
+
+	if c.handshakes > 0 && c.secureRenegotiation {
+		var expectedSecureRenegotiation [24]byte
+		copy(expectedSecureRenegotiation[:], c.localFinished[:])
+		copy(expectedSecureRenegotiation[12:], c.remoteFinished[:])
+		if !bytes.Equal(hs.remoteHelloMsg.secureRenegotiation, expectedSecureRenegotiation[:]) {
+			return c.out.setErrorLocked(errors.New("tls: incorrect renegotiation extension contents"))
+		}
+	}
+
+	return nil
+}
+
+func (hs *handshakeState) pickCipherSuite() error {
+	// 设置到 handshakeState 的 suite 和
+	// Conn 的 cipherSuite 上
+	if hs.suite = mutualCipherSuite(hs.helloMsg.cipherSuites, hs.remoteHelloMsg.cipherSuites); hs.suite == nil {
+		return hs.c.out.setErrorLocked(errors.New("tls: server chose an unconfigured cipher suite"))
+	}
+	hs.c.cipherSuite = hs.suite.id
+	return nil
+}
+
+// 12-26 从这儿开始
+func (hs *handshakeState) doFullHandshake() error {
+	c := hs.c
+
+	msg, err := c.readHandshake(&hs.finishedHash)
+	if err != nil {
+		return err
+	}
+
+	keyAgreement := hs.suite.ka
+
+	remoteKxm, ok := msg.(*keyExchangeMsg)
+	if ok {
+		err = keyAgreement.processServerKeyExchange(c.config, hs.hello, hs.serverHello, c.peerCertificates[0], skx)
+		if err != nil {
+			c.out.setErrorLocked(errors.New("alertIllegalParameter"))
+			return err
+		}
+		if len(remoteKxm.key) >= 3 && remoteKxm.key[0] == 3 /* named curve */ {
+			c.curveID = CurveID(byteorder.BEUint16(remoteKxm.key[1:]))
+		}
+
+		msg, err = c.readHandshake(&hs.finishedHash)
+		if err != nil {
+			return err
+		}
+	}
+
+	_, ok = msg.(*helloDoneMsg)
+	if !ok {
+		return c.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
+	}
+
+	preMasterSecret, localKxm, err := keyAgreement.generateClientKeyExchange(c.config)
+	if err != nil {
+		c.out.setErrorLocked(errors.New("alertInternalError"))
+		return err
+	}
+	if localKxm != nil {
+		if _, err := hs.c.writeHandshakeRecord(localKxm, &hs.finishedHash); err != nil {
+			return err
+		}
+	}
+
+	hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret,
+		hs.helloMsg.random, hs.remoteHelloMsg.random)
+
+	hs.finishedHash.discardHandshakeBuffer()
+
+	return nil
+}
+
+func (hs *handshakeState) establishKeys() error {
+	c := hs.c
+
+	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
+		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.hello.random, hs.serverHello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
+	var clientCipher, serverCipher any
+	var clientHash, serverHash hash.Hash
+	if hs.suite.cipher != nil {
+		clientCipher = hs.suite.cipher(clientKey, clientIV, false /* not for reading */)
+		clientHash = hs.suite.mac(clientMAC)
+		serverCipher = hs.suite.cipher(serverKey, serverIV, true /* for reading */)
+		serverHash = hs.suite.mac(serverMAC)
+	} else {
+		clientCipher = hs.suite.aead(clientKey, clientIV)
+		serverCipher = hs.suite.aead(serverKey, serverIV)
+	}
+
+	c.in.prepareCipherSpec(c.vers, serverCipher, serverHash)
+	c.out.prepareCipherSpec(c.vers, clientCipher, clientHash)
+	return nil
+}
+
+func (hs *handshakeState) sendFinished(out []byte) error {
+	finished := new(finishedMsg)
+	finished.verifyData = hs.finishedHash.localSum(hs.masterSecret)
+	if _, err := hs.c.writeHandshakeRecord(finished, &hs.finishedHash); err != nil {
+		return err
+	}
+	copy(out, finished.verifyData)
+	return nil
+}
+
+func (hs *handshakeState) readFinished(out []byte) error {
+	c := hs.c
+
+	// finishedMsg is included in the transcript, but not until after we
+	// check the client version, since the state before this message was
+	// sent is used during verification.
+	msg, err := c.readHandshake(nil)
+	if err != nil {
+		return err
+	}
+	serverFinished, ok := msg.(*finishedMsg)
+	if !ok {
+		return c.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
+	}
+
+	verify := hs.finishedHash.remoteSum(hs.masterSecret)
+	if len(verify) != len(serverFinished.verifyData) ||
+		subtle.ConstantTimeCompare(verify, serverFinished.verifyData) != 1 {
+		return c.out.setErrorLocked(errors.New("alertHandshakeFailure"))
+	}
+
+	if err := transcriptMsg(serverFinished, &hs.finishedHash); err != nil {
+		return err
+	}
+
+	copy(out, verify)
 	return nil
 }

@@ -212,6 +212,83 @@ func readUint8LengthPrefixed(s *cryptobyte.String, out *[]byte) bool {
 	return s.ReadUint8LengthPrefixed((*cryptobyte.String)(out))
 }
 
+func readUint24LengthPrefixed(s *cryptobyte.String, out *[]byte) bool {
+	return s.ReadUint24LengthPrefixed((*cryptobyte.String)(out))
+}
+
 type transcriptHash interface {
 	Write([]byte) (int, error)
+}
+
+func transcriptMsg(msg handshakeMessage, h transcriptHash) error {
+	if msgWithOrig, ok := msg.(handshakeMessageWithOriginalBytes); ok {
+		if orig := msgWithOrig.originalBytes(); orig != nil {
+			h.Write(msgWithOrig.originalBytes())
+			return nil
+		}
+	}
+
+	data, err := msg.marshal()
+	if err != nil {
+		return err
+	}
+	h.Write(data)
+	return nil
+}
+
+type keyExchangeMsg struct {
+	key []byte
+}
+
+func (m *keyExchangeMsg) marshal() ([]byte, error) {
+	length := len(m.key)
+	x := make([]byte, length+4)
+	x[0] = typeKeyExchange
+	x[1] = uint8(length >> 16)
+	x[2] = uint8(length >> 8)
+	x[3] = uint8(length)
+	copy(x[4:], m.key)
+
+	return x, nil
+}
+
+func (m *keyExchangeMsg) unmarshal(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	m.key = data[4:]
+	return true
+}
+
+type helloDoneMsg struct{}
+
+func (m *helloDoneMsg) marshal() ([]byte, error) {
+	x := make([]byte, 4)
+	x[0] = typeHelloDone
+	return x, nil
+}
+
+func (m *helloDoneMsg) unmarshal(data []byte) bool {
+	return len(data) == 4
+}
+
+type finishedMsg struct {
+	verifyData []byte
+}
+
+func (m *finishedMsg) marshal() ([]byte, error) {
+	var b cryptobyte.Builder
+	b.AddUint8(typeFinished)
+	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddBytes(m.verifyData)
+	})
+
+	return b.Bytes()
+}
+
+func (m *finishedMsg) unmarshal(data []byte) bool {
+	s := cryptobyte.String(data)
+	return s.Skip(1) &&
+		readUint24LengthPrefixed(&s, &m.verifyData) &&
+		s.Empty()
 }

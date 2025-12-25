@@ -22,9 +22,9 @@ const (
 	typeHelloRequest uint8 = 0
 	typeHelloMsg     uint8 = 1
 
-	typeServerKeyExchange  uint8 = 12
+	typeKeyExchange        uint8 = 12
 	typeCertificateRequest uint8 = 13
-	typeServerHelloDone    uint8 = 14
+	typeHelloDone          uint8 = 14
 	typeCertificateVerify  uint8 = 15
 	typeClientKeyExchange  uint8 = 16
 	typeFinished           uint8 = 20

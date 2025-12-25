@@ -6,6 +6,34 @@ import (
 	"github.com/albert/ws_client/crypto/sm4tongsuo"
 )
 
+// ciphersuite 的 flags 字段与对象
+// 这种特性集合字段的与对象，用 1 << iota 特别合适！
+// 刚好是:
+// 0001
+// 0010
+// 0100
+// 1000
+const (
+	// suiteECDHE indicates that the cipher suite involves elliptic curve
+	// Diffie-Hellman. This means that it should only be selected when the
+	// client indicates that it supports ECC with a curve and point format
+	// that we're happy with.
+	suiteECDHE = 1 << iota
+	// suiteECSign indicates that the cipher suite involves an ECDSA or
+	// EdDSA signature and therefore may only be selected when the server's
+	// certificate is ECDSA or EdDSA. If this is not set then the cipher suite
+	// is RSA based.
+	suiteECSign
+	// suiteTLS12 indicates that the cipher suite should only be advertised
+	// and accepted when using TLS 1.2.
+	suiteTLS12
+	// suiteSHA384 indicates that the cipher suite uses SHA384 as the
+	// handshake hash.
+	suiteSHA384
+
+	suiteSM3
+)
+
 const (
 	// 国密SM2密钥交换+SM4-SM3
 	E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3 uint16 = 0x002b
@@ -84,7 +112,8 @@ type cipherSuite struct {
 	keyLen int
 	macLen int
 	ivLen  int
-	ka     func(version uint16) keyAgreement
+	// ka     func(version uint16) keyAgreement
+	ka keyAgreement
 	// flags is a bitmask of the suite* values, above.
 	flags  int
 	cipher func(key, iv []byte, isRead bool) any
@@ -140,13 +169,21 @@ type cipherSuite struct {
 // 	TLS_RSA_WITH_RC4_128_SHA,
 // }
 
-func mutualCipherSuite(have []uint16, want uint16) *cipherSuite {
+func mutualCipherSuiteOld(have []uint16, want uint16) *cipherSuite {
 	for _, id := range have {
 		if id == want {
 			return cipherSuiteByID(id)
 		}
 	}
 	return nil
+}
+
+func mutualCipherSuite(have []uint16, want []uint16) *cipherSuite {
+	pickedCiphersuite := Intersection(have, want)
+	if pickedCiphersuite == 0 {
+		return nil
+	}
+	return cipherSuiteByID(pickedCiphersuite)
 }
 
 func cipherSuiteByID(id uint16) *cipherSuite {

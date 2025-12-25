@@ -21,9 +21,14 @@ import (
 type Conn struct {
 	conn websocket.Conn
 
-	vers uint16
+	vers        uint16
+	cipherSuite uint16
+
+	secureRenegotiation bool
 
 	activeCall atomic.Int32
+
+	curveID CurveID
 
 	closeNotifyErr  error
 	closeNotifySent bool
