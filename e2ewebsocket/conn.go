@@ -105,16 +105,9 @@ func (c *Conn) Read(b []byte) (int, error) {
 	return n, nil
 }
 
-//readRecordOrCCS 从连接中读取一个或多个 TLS 记录，并更新记录层状态。一些不变条件：
-// - c.in 必须已加锁
-// - c.input 必须为空
-
-// 在握手期间，以下情况中恰好会发生一种：
-// - c.hand 增长
-// - 调用 c.in.changeCipherSpec
-// - 返回错误
-
 func (c *Conn) readRecord() error {
+	//readRecordOrCCS 从连接中读取一个 TLS 记录【特殊情况触发重试时多读1个】，并更新记录层状态。
+
 	// 是否已出现过 read 错误
 	if c.in.err != nil {
 		return c.in.err
@@ -247,7 +240,6 @@ func (c *Conn) unmarshalHandshakeMessage(data []byte, transcript transcriptHash)
 	return m, nil
 }
 
-// readHandshakeBytes reads handshake data until c.hand contains at least n bytes.
 func (c *Conn) readHandshakeBytes(n int) error {
 	for c.hand.Len() < n {
 		if err := c.readRecord(); err != nil {
@@ -255,6 +247,12 @@ func (c *Conn) readHandshakeBytes(n int) error {
 		}
 	}
 	return nil
+}
+
+var outBufPool = sync.Pool{
+	New: func() any {
+		return new([]byte)
+	},
 }
 
 func (c *Conn) Write(b []byte) (n int, err error) {
@@ -312,14 +310,8 @@ func (c *Conn) writeHandshakeRecord(msg handshakeMessage, transcript transcriptH
 	return c.writeRecordLocked(recordTypeHandshake, data)
 }
 
-var outBufPool = sync.Pool{
-	New: func() any {
-		return new([]byte)
-	},
-}
-
-// writeRecordLocked 写入记录，这里的 type 只能是握手或者应用了
 func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
+	// writeRecordLocked 写入记录，这里的 type 只能是握手或者应用了
 	if len(data) == 0 {
 		return 0, errors.New("zero length write")
 	}
@@ -774,6 +766,28 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 	hc.incSeq()
 
 	return record, nil
+}
+
+func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash) {
+	hc.version = version
+	hc.nextCipher = cipher
+	hc.nextMac = mac
+}
+
+func (hc *halfConn) changeCipherSpec() error {
+	if hc.nextCipher == nil {
+		return errors.New("alertInternalError")
+	}
+	hc.cipher = hc.nextCipher
+	hc.mac = hc.nextMac
+	hc.nextCipher = nil
+	hc.nextMac = nil
+	// 将64位序列号seq重置为全0
+	// 这是TLS协议要求的，确保新的加密状态使用新的序列号计数
+	for i := range hc.seq {
+		hc.seq[i] = 0
+	}
+	return nil
 }
 
 // =======================================================

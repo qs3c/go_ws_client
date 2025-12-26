@@ -188,7 +188,7 @@ func (hs *handshakeState) handshake() error {
 	if err := hs.establishKeys(); err != nil {
 		return err
 	}
-	if err := hs.sendFinished(c.clientFinished[:]); err != nil {
+	if err := hs.sendFinished(c.localFinished[:]); err != nil {
 		return err
 	}
 
@@ -246,7 +246,6 @@ func (hs *handshakeState) pickCipherSuite() error {
 	return nil
 }
 
-// 12-26 从这儿开始
 func (hs *handshakeState) doFullHandshake() error {
 	c := hs.c
 

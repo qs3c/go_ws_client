@@ -8,21 +8,16 @@ import (
 
 type helloMsg struct {
 	original []byte
-	// vers 是历史遗留的版本号，为了兼容性而存在
-	// 不考虑兼容性时只使用 supportedVersions 即可
-	// vers     uint16
+
 	supportedVersions []uint16
 
 	random []byte
 
-	cipherSuites       []uint16
-	compressionMethods []uint8
-
+	cipherSuites    []uint16
 	supportedCurves []CurveID
 
 	secureRenegotiationSupported bool
 	secureRenegotiation          []byte
-	extendedMasterSecret         bool
 
 	extensions []uint16
 }

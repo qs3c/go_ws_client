@@ -2,8 +2,6 @@ package e2ewebsocket
 
 import (
 	"hash"
-
-	"github.com/albert/ws_client/crypto/sm4tongsuo"
 )
 
 // ciphersuite 的 flags 字段与对象
@@ -118,7 +116,7 @@ type cipherSuite struct {
 	flags  int
 	cipher func(key, iv []byte, isRead bool) any
 	mac    func(key []byte) hash.Hash
-	aead   func(key, fixedNonce []byte) sm4tongsuo.AEAD
+	aead   func(key, fixedNonce []byte) aead
 }
 
 // var cipherSuites = []*cipherSuite{ // TODO: replace with a map, since the order doesn't matter.
