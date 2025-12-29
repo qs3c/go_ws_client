@@ -1,12 +1,11 @@
-//go:build testsdk
+////go:build testsdk
 
 package main
 
 import (
 	"fmt"
 
-	"github.com/albert/ws_client/sm2keyexch"
-
+	"github.com/albert/ws_client/crypto/sm2keyexch"
 )
 
 func main() {
@@ -115,6 +114,66 @@ func main() {
 	printHex("SharedKey:", keyLocal)
 	printHex("ChecksumLocal:", csLocal)
 	printHex("ChecksumRemote:", csRemote)
+
+	fmt.Println("\n--- Testing Serialization Functions ---")
+
+	// 1. Serialize Private Key
+	privBytes, err := local.SerializePrivateKey()
+	if err != nil {
+		fmt.Printf("SerializePrivateKey failed: %v\n", err)
+		return
+	}
+	printHex("Serialized Private Key: ", privBytes)
+	fmt.Printf("len(privBytes): %d\n", len(privBytes))
+	// 2. Deserialize Private Key
+	newLocal, err := sm2keyexch.NewECKeyFromPrivateKey(privBytes)
+	if err != nil {
+		fmt.Printf("NewECKeyFromPrivateKey failed: %v\n", err)
+		return
+	}
+	defer newLocal.Free()
+	fmt.Println("NewECKeyFromPrivateKey success")
+
+	// Verify Private Key Integrity
+	privBytes2, err := newLocal.SerializePrivateKey()
+	if err != nil {
+		fmt.Printf("SerializePrivateKey (new) failed: %v\n", err)
+		return
+	}
+	if string(privBytes) == string(privBytes2) {
+		fmt.Println(">> Private Key Verified: Original and deserialized keys match.")
+	} else {
+		fmt.Println(">> Private Key Mismatch!")
+	}
+
+	// 3. Serialize Public Key
+	pubBytes, err := localPub.SerializePublicKey()
+	if err != nil {
+		fmt.Printf("SerializePublicKey failed: %v\n", err)
+		return
+	}
+	printHex("Serialized Public Key: ", pubBytes)
+	fmt.Printf("len(pubBytes): %d\n", len(pubBytes))
+	// 4. Deserialize Public Key
+	newPub, err := sm2keyexch.NewECKeyFromPublicKey(pubBytes)
+	if err != nil {
+		fmt.Printf("NewECKeyFromPublicKey failed: %v\n", err)
+		return
+	}
+	defer newPub.Free()
+	fmt.Println("NewECKeyFromPublicKey success")
+
+	// Verify Public Key Integrity
+	pubBytes2, err := newPub.SerializePublicKey()
+	if err != nil {
+		fmt.Printf("SerializePublicKey (new) failed: %v\n", err)
+		return
+	}
+	if string(pubBytes) == string(pubBytes2) {
+		fmt.Println(">> Public Key Verified: Original and deserialized keys match.")
+	} else {
+		fmt.Println(">> Public Key Mismatch!")
+	}
 }
 
 func printHex(label string, buf []byte) {

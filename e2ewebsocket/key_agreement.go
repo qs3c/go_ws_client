@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/albert/ws_client/sm2keyexch"
+	"github.com/albert/ws_client/crypto/sm2keyexch"
 )
 
 var errKeyExchange = errors.New("invalid KeyExchange message")
