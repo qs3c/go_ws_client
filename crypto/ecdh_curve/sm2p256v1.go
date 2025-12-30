@@ -22,18 +22,22 @@ var sm2p256v1 = &sm2p256v1Curve{}
 
 type sm2p256v1Curve struct {
 	// 预共享信息 用户ID 和静态公钥
-	localID               string
-	remoteID              string
-	localStaticPublicKey  *ccrypto.ECKey
-	remoteStaticPublicKey *ccrypto.ECKey
+	localID                 string
+	remoteID                string
+	localStaticECKeyPrivate *ccrypto.ECKey
+	remoteStaticECKeyPublic *ccrypto.ECKey
+	initiator               bool
+	doCheckSum              bool
 }
 
-func NewSm2P256V1(localID string, remoteID string, localStaticPublicKey *ccrypto.ECKey, remoteStaticPublicKey *ccrypto.ECKey) *sm2p256v1Curve {
+func NewSm2P256V1(localID string, remoteID string, localStaticECKeyPrivate *ccrypto.ECKey, remoteStaticECKeyPublic *ccrypto.ECKey, initiator bool) *sm2p256v1Curve {
 	return &sm2p256v1Curve{
-		localID:               localID,
-		remoteID:              remoteID,
-		localStaticPublicKey:  localStaticPublicKey,
-		remoteStaticPublicKey: remoteStaticPublicKey,
+		localID:                 localID,
+		remoteID:                remoteID,
+		localStaticECKeyPrivate: localStaticECKeyPrivate,
+		remoteStaticECKeyPublic: remoteStaticECKeyPublic,
+		initiator:               initiator,
+		doCheckSum:              true,
 	}
 }
 
@@ -41,6 +45,7 @@ func (c *sm2p256v1Curve) String() string {
 	return "SM2P256V1"
 }
 
+// 产生新的随机 eckey 并包装到 sm2PrivateKey
 func (c *sm2p256v1Curve) GenerateKey(rand io.Reader) (PrivateKey, error) {
 	eckey, err := ccrypto.NewECKeySM2()
 	if err != nil {
@@ -58,6 +63,7 @@ func (c *sm2p256v1Curve) GenerateKey(rand io.Reader) (PrivateKey, error) {
 	return c.NewPrivateKey(privBytes)
 }
 
+// eckey 的字节序列包装为 sm2PrivateKey，过程中产生了 sm2PublicKey
 func (c *sm2p256v1Curve) NewPrivateKey(key []byte) (PrivateKey, error) {
 	if len(key) != sm2p256v1PrivateKeySize {
 		return nil, errors.New("sm2p256v1: invalid private key size")
@@ -94,6 +100,7 @@ func (c *sm2p256v1Curve) NewPrivateKey(key []byte) (PrivateKey, error) {
 	}, nil
 }
 
+// eckeyPub 的字节序列包装为 sm2PublicKey
 func (c *sm2p256v1Curve) NewPublicKey(key []byte) (PublicKey, error) {
 	if len(key) != sm2p256v1PublicKeySize {
 		return nil, errors.New("sm2p256v1: invalid public key size")
@@ -106,8 +113,39 @@ func (c *sm2p256v1Curve) NewPublicKey(key []byte) (PublicKey, error) {
 
 }
 
+// 无需输入本地的临时私钥，只需输入对方的临时公钥 RB，实际使用时第一个入参填 nil
 func (c *sm2p256v1Curve) ecdh(local PrivateKey, remote PublicKey) ([]byte, error) {
-	return nil, nil
+	if local != nil {
+		return nil, errors.New("sm2p256v1: local private key needed to be nil")
+	}
+	if remote == nil {
+		return nil, errors.New("sm2p256v1: remote public key (RB) cant be nil")
+	}
+	remotePublicKey, ok := remote.(*sm2PublicKey)
+	if !ok {
+		return nil, errors.New("sm2p256v1: remote public key type mismatch")
+	}
+	RB := remotePublicKey.publicKey
+
+	ctxLocal := sm2keyexch.NewKAPCtx()
+
+	if err := ctxLocal.Init(c.localStaticECKeyPrivate, c.localID, c.remoteStaticECKeyPublic, c.remoteID, c.initiator, c.doCheckSum); err != nil {
+		return nil, err
+	}
+	RA, err := ctxLocal.Prepare()
+	if err != nil {
+		return nil, err
+	}
+	keyLocal, csLocal, err := ctxLocal.ComputeKey(RB, 32)
+	if err != nil {
+		return nil, err
+	}
+	// 怎么把RA csLocal 传出去，怎么把csRemote弄进来
+	if err := ctxLocal.FinalCheck(csRemote); err != nil {
+		return nil, err
+	}
+
+	return keyLocal, nil
 }
 
 // --- PrivateKey Implementation ---
