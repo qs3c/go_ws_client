@@ -22,26 +22,15 @@ var _ Curve = (*sm2p256v1Curve)(nil)
 var sm2p256v1 = &sm2p256v1Curve{}
 
 type sm2p256v1Curve struct {
-	// 预共享信息 用户ID 和静态公钥
-	localID                 string
-	remoteID                string
-	localStaticECKeyPrivate *ccrypto.ECKey
-	remoteStaticECKeyPublic *ccrypto.ECKey
-	initiator               bool
-	doCheckSum              bool
-	RA                      []byte
-	csLocal                 []byte
-	csRemote                []byte
+	initiator  bool
+	doCheckSum bool
+	csLocal    []byte
 }
 
-func NewSm2P256V1(localID string, remoteID string, localStaticECKeyPrivate *ccrypto.ECKey, remoteStaticECKeyPublic *ccrypto.ECKey, initiator bool) *sm2p256v1Curve {
+func NewSm2P256V1(initiator bool) *sm2p256v1Curve {
 	return &sm2p256v1Curve{
-		localID:                 localID,
-		remoteID:                remoteID,
-		localStaticECKeyPrivate: localStaticECKeyPrivate,
-		remoteStaticECKeyPublic: remoteStaticECKeyPublic,
-		initiator:               initiator,
-		doCheckSum:              true,
+		initiator:  initiator,
+		doCheckSum: true,
 	}
 }
 
@@ -133,21 +122,24 @@ func (c *sm2p256v1Curve) ecdh(local PrivateKey, remote PublicKey) (keyLocal []by
 
 	ctxLocal := sm2keyexch.NewKAPCtx()
 
-	if err := ctxLocal.Init(c.localStaticECKeyPrivate, c.localID, c.remoteStaticECKeyPublic, c.remoteID, c.initiator, c.doCheckSum); err != nil {
-		return nil, err
-	}
-	c.RA, err = ctxLocal.Prepare()
-	if err != nil {
-		return nil, err
-	}
+	// if err := ctxLocal.Init(c.localStaticECKeyPrivate, c.localID, c.remoteStaticECKeyPublic, c.remoteID, c.initiator, c.doCheckSum); err != nil {
+	// 	return nil, err
+	// }
+	// // 这一步要分出去，不能放在 ecdh 里面
+	// c.RA, err = ctxLocal.Prepare()
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// ecdh里面只做 Compute key 和 FinalCheck 都做不了
 	keyLocal, c.csLocal, err = ctxLocal.ComputeKey(RB, 32)
 	if err != nil {
 		return nil, err
 	}
 	// 怎么把RA csLocal 传出去，怎么把csRemote弄进来
-	if err := ctxLocal.FinalCheck(c.csRemote); err != nil {
-		return nil, err
-	}
+
+	// if err := ctxLocal.FinalCheck(c.csRemote); err != nil {
+	// 	return nil, err
+	// }
 
 	return keyLocal, nil
 }
@@ -158,6 +150,14 @@ type sm2PrivateKey struct {
 	curve      Curve
 	privateKey []byte
 	publicKey  PublicKey
+}
+
+// 给一个获取空sm2PrivateKey的方法
+
+func NewEmptySm2PrivateKey(sm2Curve Curve) *sm2PrivateKey {
+	return &sm2PrivateKey{
+		curve: sm2Curve,
+	}
 }
 
 // 比较两个私钥是否相等
