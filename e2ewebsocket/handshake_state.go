@@ -242,6 +242,7 @@ func (hs *handshakeState) pickCipherSuite() error {
 	if hs.suite = mutualCipherSuite(hs.helloMsg.cipherSuites, hs.remoteHelloMsg.cipherSuites); hs.suite == nil {
 		return hs.c.out.setErrorLocked(errors.New("tls: server chose an unconfigured cipher suite"))
 	}
+	// todo: 如果是国密这里suite的ka要特殊构造
 	hs.c.cipherSuite = hs.suite.id
 	return nil
 }

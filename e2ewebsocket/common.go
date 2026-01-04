@@ -90,7 +90,7 @@ const (
 	CurveP521      CurveID = 25
 	X25519         CurveID = 29
 	X25519MLKEM768 CurveID = 4588
-	// SM2CurveP256V1 CurveID = 4152
+	SM2CurveP256V1 CurveID = 4152
 	// SM2MLKEM768 CurveID = 4589
 )
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	ccrypto "github.com/albert/ws_client/crypto"
 	"github.com/albert/ws_client/crypto/sm2keyexch"
 )
 
@@ -22,13 +23,13 @@ type keyAgreement interface {
 // }
 
 type sm2KeyAgreement struct {
-	local    *sm2keyexch.ECKey
+	local    *ccrypto.ECKey
 	localId  string
 	ctxLocal *sm2keyexch.KAPCtx
 	keyLen   int
 }
 
-func NewSM2KeyAgreement(local *sm2keyexch.ECKey, localId string, keyLen int) *sm2KeyAgreement {
+func NewSM2KeyAgreement(local *ccrypto.ECKey, localId string, keyLen int) *sm2KeyAgreement {
 	return &sm2KeyAgreement{
 		local:    local,
 		localId:  localId,
@@ -59,9 +60,34 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, hello *hello
 		return errKeyExchange
 	}
 
+	// 到这里，双方id以及静态的公私钥其实都是有的，但是从哪传进来?
+	// 比如生成 sm2 的 KA 的时候，所以会出现和不同的人协商 suite 是一样的，但是 ka 是不同的
+	// 那是不是和不同人，handshakeState也不同？
 	if _, ok := curveForCurveID(curveID); !ok {
 		return errors.New("remote used unsupported curve")
 	}
+
+	key, err := generateECDHEKey(config.rand(), curveID)
+	if err != nil {
+		return err
+	}
+	ka.key = key
+
+	peerKey, err := key.Curve().NewPublicKey(publicKey)
+	if err != nil {
+		return errServerKeyExchange
+	}
+
+	ka.preMasterSecret, err = key.ECDH(peerKey)
+	if err != nil {
+		return errServerKeyExchange
+	}
+
+	ourPublicKey := key.PublicKey().Bytes()
+	ka.ckx = new(clientKeyExchangeMsg)
+	ka.ckx.ciphertext = make([]byte, 1+len(ourPublicKey))
+	ka.ckx.ciphertext[0] = byte(len(ourPublicKey))
+	copy(ka.ckx.ciphertext[1:], ourPublicKey)
 
 	// 第二部分：验证签名
 	var sigType uint8
