@@ -1,6 +1,7 @@
 package e2ewebsocket
 
 import (
+	"crypto"
 	"crypto/rand"
 	"internal/godebug"
 	"io"
@@ -17,6 +18,49 @@ const (
 	scsvRenegotiation uint16 = 0x00ff
 )
 
+// 签名算法类型
+const (
+	signaturePKCS1v15 uint8 = iota + 225
+	signatureRSAPSS
+	signatureECDSA
+	signatureEd25519
+	// 新增国密
+	signatureSM2
+)
+
+// 只签名不哈希
+var directSigning crypto.Hash = 0
+
+// 签名方案类型（签名+哈希）
+type SignatureScheme uint16
+
+const (
+	// RSASSA-PKCS1-v1_5 algorithms.
+	PKCS1WithSHA256 SignatureScheme = 0x0401
+	PKCS1WithSHA384 SignatureScheme = 0x0501
+	PKCS1WithSHA512 SignatureScheme = 0x0601
+
+	// RSASSA-PSS algorithms with public key OID rsaEncryption.
+	PSSWithSHA256 SignatureScheme = 0x0804
+	PSSWithSHA384 SignatureScheme = 0x0805
+	PSSWithSHA512 SignatureScheme = 0x0806
+
+	// ECDSA algorithms. Only constrained to a specific curve in TLS 1.3.
+	ECDSAWithP256AndSHA256 SignatureScheme = 0x0403
+	ECDSAWithP384AndSHA384 SignatureScheme = 0x0503
+	ECDSAWithP521AndSHA512 SignatureScheme = 0x0603
+
+	// EdDSA algorithms.
+	Ed25519 SignatureScheme = 0x0807
+
+	// Legacy signature and hash algorithms for TLS 1.2.
+	PKCS1WithSHA1 SignatureScheme = 0x0201
+	ECDSAWithSHA1 SignatureScheme = 0x0203
+
+	// 新增国密
+	SM2WithSM3 SignatureScheme = 0x0909
+)
+
 // 握手消息类型
 const (
 	typeHelloRequest uint8 = 0
@@ -24,11 +68,7 @@ const (
 
 	typeKeyExchange        uint8 = 12
 	typeCertificateRequest uint8 = 13
-	typeHelloDone          uint8 = 14
-	typeCertificateVerify  uint8 = 15
-	typeClientKeyExchange  uint8 = 16
 	typeFinished           uint8 = 20
-	typeCertificateStatus  uint8 = 22
 	typeKeyUpdate          uint8 = 24
 	typeMessageHash        uint8 = 254 // synthetic message
 )
@@ -118,7 +158,8 @@ type Config struct {
 
 	CipherSuites []uint16
 
-	CurvePreferences []CurveID
+	CurvePreferences          []CurveID
+	SignatureSchemePreference []SignatureScheme
 }
 
 var emptyConfig Config
@@ -136,6 +177,10 @@ func (c *Config) cipherSuites() []uint16 {
 
 func defaultCipherSuites() []uint16 {
 	return cipherSuitesPreferenceOrder
+}
+
+func (c *Config) supportedSignatureAlgorithms() []SignatureScheme {
+	return defaultSupportedSignatureAlgorithms
 }
 
 func (c *Config) curvePreferences(version uint16) []CurveID {

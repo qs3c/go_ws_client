@@ -2,18 +2,20 @@ package e2ewebsocket
 
 import (
 	"crypto"
+	"crypto/sha1"
 	"errors"
 
 	ccrypto "github.com/albert/ws_client/crypto"
 	"github.com/albert/ws_client/crypto/ecdh_curve"
 	"github.com/albert/ws_client/crypto/sm2keyexch"
+	"github.com/albert/ws_client/crypto/sm3tongsuo"
 )
 
 var errKeyExchange = errors.New("invalid KeyExchange message")
 
 type keyAgreement interface {
 	generateLocalKeyExchange(*Config, *helloMsg) (*keyExchangeMsg, error)
-	processRemoteKeyExchange(*Config, *helloMsg, *helloMsg, *keyExchangeMsg) ([]byte, error)
+	processRemoteKeyExchange(*Config, SignatureScheme, *helloMsg, *helloMsg, *keyExchangeMsg) ([]byte, error)
 }
 
 // type keyAgreement interface {
@@ -22,6 +24,7 @@ type keyAgreement interface {
 // }
 
 type sm2KeyAgreement struct {
+	version               uint16
 	preMasterSecret       []byte
 	localStaticPrivateKey *ccrypto.ECKey
 	remoteStaticPublicKey *ccrypto.ECKey
@@ -62,7 +65,7 @@ func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, localHello *
 }
 
 // 这本来就是 sm2 交换的密钥处理逻辑函数，无需考虑兼容性
-func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, hello *helloMsg, remoteHello *helloMsg, kxm *keyExchangeMsg) error {
+func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureScheme SignatureScheme, hello *helloMsg, remoteHello *helloMsg, kxm *keyExchangeMsg) error {
 	// 第一部分：验证临时公钥
 	if len(kxm.key) < 4 {
 		return errKeyExchange
@@ -146,15 +149,22 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, hello *hello
 		return errKeyExchange
 	}
 
-	if !isSupportedSignatureAlgorithm(signatureAlgorithm, clientHello.supportedSignatureAlgorithms) {
-		return errors.New("tls: certificate used with invalid signature algorithm")
+	// if !isSupportedSignatureAlgorithm(signatureAlgorithm, hello.supportedSignatureAlgorithms) {
+	// 	return errors.New("tls: certificate used with invalid signature algorithm")
+	// }
+
+	// 核对一下跟pick选择的是不是一个
+	if signatureAlgorithm != signatureScheme {
+		return errors.New("used with invalid signature algorithm")
 	}
-	sigType, sigHash, err = typeAndHashFromSignatureScheme(signatureAlgorithm)
+	sigType, sigHash, err = typeAndHashFromSignatureScheme(signatureScheme)
 	if err != nil {
 		return err
 	}
 
-	if (sigType == signaturePKCS1v15 || sigType == signatureRSAPSS) != ka.isRSA {
+	// if (sigType == signaturePKCS1v15 || sigType == signatureRSAPSS) != ka.isRSA {
+	if sigType != signatureSM2 {
+		// SM2 密钥协商中不可以用其他签名只能用 SM2	 签名
 		return errKeyExchange
 	}
 
@@ -164,8 +174,8 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, hello *hello
 	}
 	sig = sig[2:]
 
-	signed := hashForServerKeyExchange(sigType, sigHash, ka.version, clientHello.random, serverHello.random, serverECDHEParams)
-	if err := verifyHandshakeSignature(sigType, cert.PublicKey, sigHash, signed, sig); err != nil {
+	signed := hashForKeyExchange(sigType, sigHash, ka.version, hello.random, remoteHello.random, remoteECDHEParams)
+	if err := verifyHandshakeSignature(sigType, ka.remoteStaticPublicKey, sigHash, signed, sig); err != nil {
 		return errors.New("tls: invalid signature by the server certificate: " + err.Error())
 	}
 	return nil
@@ -188,10 +198,45 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, hello *hello
 
 // func (k *sm2KeyAgreement) ComputeKey(remotePoint []byte) ([]byte, []byte, error) {
 
-// 	keyLocal, csLocal, err := k.ctxLocal.ComputeKey(remotePoint, k.keyLen)
-// 	if err != nil {
-// 		fmt.Println("SM2 KAP failed")
-// 		return nil, nil, err
-// 	}
-// 	return keyLocal, csLocal, nil
-// }
+//		keyLocal, csLocal, err := k.ctxLocal.ComputeKey(remotePoint, k.keyLen)
+//		if err != nil {
+//			fmt.Println("SM2 KAP failed")
+//			return nil, nil, err
+//		}
+//		return keyLocal, csLocal, nil
+//	}
+func hashForKeyExchange(sigType uint8, hashFunc crypto.Hash, version uint16, slices ...[]byte) []byte {
+	if sigType == signatureEd25519 {
+		var signed []byte
+		for _, slice := range slices {
+			signed = append(signed, slice...)
+		}
+		return signed
+	}
+	if sigType == signatureECDSA {
+		return sha1Hash(slices)
+	}
+	// SM3 特别处理
+	if hashFunc == ccrypto.SM3 {
+		hash := sm3tongsuo.NewSM3()
+		for _, slice := range slices {
+			hash.Write(slice)
+		}
+		return hash.Sum(nil)
+	}
+	h := hashFunc.New()
+	for _, slice := range slices {
+		h.Write(slice)
+	}
+	digest := h.Sum(nil)
+	return digest
+
+}
+
+func sha1Hash(slices [][]byte) []byte {
+	hsha1 := sha1.New()
+	for _, slice := range slices {
+		hsha1.Write(slice)
+	}
+	return hsha1.Sum(nil)
+}

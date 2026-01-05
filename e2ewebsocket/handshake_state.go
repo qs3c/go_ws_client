@@ -40,13 +40,14 @@ import (
 // }
 
 type handshakeState struct {
-	c              *Conn
-	ctx            context.Context
-	helloMsg       *helloMsg
-	remoteHelloMsg *helloMsg
-	suite          *cipherSuite
-	finishedHash   finishedHash
-	masterSecret   []byte
+	c               *Conn
+	ctx             context.Context
+	helloMsg        *helloMsg
+	remoteHelloMsg  *helloMsg
+	suite           *cipherSuite
+	signatureScheme SignatureScheme
+	finishedHash    finishedHash
+	masterSecret    []byte
 }
 
 func (c *Conn) symHandshake(ctx context.Context) (err error) {
@@ -55,18 +56,18 @@ func (c *Conn) symHandshake(ctx context.Context) (err error) {
 		c.config = defaultConfig()
 	}
 
-	// 【第一大步：生成客户端 Hello】
+	// 【第一大步：生成本地 Hello 消息】
 	hello, err := c.makeHello()
 	if err != nil {
 		return err
 	}
 
-	// 【第二大步：发送 ClientHello 消息】
+	// 【第二大步：发送本地 Hello 消息】
 	if _, err := c.writeHandshakeRecord(hello, nil); err != nil {
 		return err
 	}
 
-	// serverHelloMsg is not included in the transcript
+	// 【第三大步：接收对端 Hello 消息】
 	msg, err := c.readHandshake(nil)
 	if err != nil {
 		return err
@@ -78,10 +79,12 @@ func (c *Conn) symHandshake(ctx context.Context) (err error) {
 		return errors.New("unexpectedMessageError")
 	}
 
+	// 选出来的版本直接记到 Conn 里面了
 	if err := c.pickE2EVersion(remoteHello); err != nil {
 		return err
 	}
 
+	// 后续如果改到 Session 下，相当于每个握手 Session 都有自己独立的 handshakeState
 	hs := &handshakeState{
 		c:              c,
 		ctx:            ctx,
@@ -103,15 +106,25 @@ func (c *Conn) makeHello() (*helloMsg, error) {
 		config.supportedVersions = config.defaultSupportedVersions()
 	}
 
-	if len(config.supportedVersions) == 0 {
-		return nil, errors.New("tls: no supported versions satisfy MinVersion and MaxVersion")
+	if config.CurvePreferences == nil {
+		config.CurvePreferences = config.curvePreferences(version)
+	}
+
+	// 可通过 config 设置，没设置走默认
+	if config.SignatureSchemePreference == nil {
+		config.SignatureSchemePreference = config.supportedSignatureAlgorithms()
+	}
+
+	if len(config.supportedVersions) == 0 || len(config.CurvePreferences) == 0 || len(config.SignatureSchemePreference) == 0 {
+		return nil, errors.New("no supported versions or curves or signature schemes")
 	}
 
 	hello := &helloMsg{
 		supportedVersions:            config.supportedVersions,
 		random:                       make([]byte, 32),
-		supportedCurves:              config.curvePreferences(version),
+		supportedCurves:              config.CurvePreferences,
 		secureRenegotiationSupported: true,
+		supportedSignatureAlgorithms: config.SignatureSchemePreference,
 	}
 
 	// 重协商需包含之前的 finished 消息一起计算
@@ -217,6 +230,10 @@ func (hs *handshakeState) processHello() error {
 		return err
 	}
 
+	if err := hs.pickSignatureScheme(); err != nil {
+		return err
+	}
+
 	if c.handshakes == 0 && hs.remoteHelloMsg.secureRenegotiationSupported {
 		c.secureRenegotiation = true
 		if len(hs.remoteHelloMsg.secureRenegotiation) != 0 {
@@ -247,6 +264,14 @@ func (hs *handshakeState) pickCipherSuite() error {
 	return nil
 }
 
+func (hs *handshakeState) pickSignatureScheme() error {
+
+	if hs.signatureScheme = mutualSignatureScheme(hs.helloMsg.supportedSignatureAlgorithms, hs.remoteHelloMsg.supportedSignatureAlgorithms); hs.signatureScheme == 0 {
+		return hs.c.out.setErrorLocked(errors.New("tls: server chose an unconfigured signature scheme"))
+	}
+	return nil
+}
+
 func (hs *handshakeState) doFullHandshake() error {
 	// 要保证的是 hs 上的逻辑是统一的
 	// 但是内部 ka 上的逻辑是不用统一的
@@ -274,24 +299,16 @@ func (hs *handshakeState) doFullHandshake() error {
 	remoteKxm, ok := msg.(*keyExchangeMsg)
 	var preMasterSecret []byte
 	if ok {
-		preMasterSecret, err = keyAgreement.processRemoteKeyExchange(c.config, hs.helloMsg, hs.remoteHelloMsg, remoteKxm)
+		preMasterSecret, err = keyAgreement.processRemoteKeyExchange(c.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg, remoteKxm)
 		if err != nil {
 			c.out.setErrorLocked(errors.New("alertIllegalParameter"))
 			return err
 		}
+		// 获取曲线并记录
 		if len(remoteKxm.key) >= 3 && remoteKxm.key[0] == 3 /* named curve */ {
 			c.curveID = CurveID(byteorder.BEUint16(remoteKxm.key[1:]))
 		}
 
-		msg, err = c.readHandshake(&hs.finishedHash)
-		if err != nil {
-			return err
-		}
-	}
-
-	_, ok = msg.(*helloDoneMsg)
-	if !ok {
-		return c.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
 	}
 
 	hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random)

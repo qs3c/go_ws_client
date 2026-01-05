@@ -454,6 +454,7 @@ func (c *Conn) HandshakeContext(ctx context.Context) error {
 	return c.handshakeContext(ctx)
 }
 
+// 这些握手相关的，看起来应该挂到 Session 下而不是 Conn 下【Read Write 继续挂在 Conn 下】
 func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 
 	if c.isHandshakeComplete.Load() {

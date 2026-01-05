@@ -9,12 +9,12 @@ import (
 type helloMsg struct {
 	original []byte
 
-	supportedVersions []uint16
-
 	random []byte
 
-	cipherSuites    []uint16
-	supportedCurves []CurveID
+	cipherSuites                 []uint16
+	supportedVersions            []uint16
+	supportedCurves              []CurveID
+	supportedSignatureAlgorithms []SignatureScheme
 
 	secureRenegotiationSupported bool
 	secureRenegotiation          []byte
@@ -255,17 +255,17 @@ func (m *keyExchangeMsg) unmarshal(data []byte) bool {
 	return true
 }
 
-type helloDoneMsg struct{}
+// type helloDoneMsg struct{}
 
-func (m *helloDoneMsg) marshal() ([]byte, error) {
-	x := make([]byte, 4)
-	x[0] = typeHelloDone
-	return x, nil
-}
+// func (m *helloDoneMsg) marshal() ([]byte, error) {
+// 	x := make([]byte, 4)
+// 	x[0] = typeHelloDone
+// 	return x, nil
+// }
 
-func (m *helloDoneMsg) unmarshal(data []byte) bool {
-	return len(data) == 4
-}
+// func (m *helloDoneMsg) unmarshal(data []byte) bool {
+// 	return len(data) == 4
+// }
 
 type finishedMsg struct {
 	verifyData []byte

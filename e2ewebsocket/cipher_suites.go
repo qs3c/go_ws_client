@@ -184,6 +184,15 @@ func mutualCipherSuite(have []uint16, want []uint16) *cipherSuite {
 	return cipherSuiteByID(pickedCiphersuite)
 }
 
+// 暂时放在这，放这里不太合适其实
+func mutualSignatureScheme(have []SignatureScheme, want []SignatureScheme) SignatureScheme {
+	pickedSignatureScheme := Intersection(have, want)
+	if pickedSignatureScheme == 0 {
+		return 0
+	}
+	return pickedSignatureScheme
+}
+
 func cipherSuiteByID(id uint16) *cipherSuite {
 	suite, ok := cipherSuites[id]
 	if !ok {
