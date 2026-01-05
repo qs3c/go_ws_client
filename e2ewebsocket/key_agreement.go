@@ -2,9 +2,7 @@ package e2ewebsocket
 
 import (
 	"crypto"
-	"crypto/x509"
 	"errors"
-	"fmt"
 
 	ccrypto "github.com/albert/ws_client/crypto"
 	"github.com/albert/ws_client/crypto/ecdh_curve"
@@ -14,8 +12,8 @@ import (
 var errKeyExchange = errors.New("invalid KeyExchange message")
 
 type keyAgreement interface {
-	processRemoteKeyExchange(*Config, *clientHelloMsg, *serverHelloMsg, *x509.Certificate, *serverKeyExchangeMsg) error
-	generateLocalKeyExchange(*Config, *clientHelloMsg, *x509.Certificate) ([]byte, *clientKeyExchangeMsg, error)
+	generateLocalKeyExchange(*Config, *helloMsg) (*keyExchangeMsg, error)
+	processRemoteKeyExchange(*Config, *helloMsg, *helloMsg, *keyExchangeMsg) ([]byte, error)
 }
 
 // type keyAgreement interface {
@@ -49,6 +47,20 @@ func NewSM2KeyAgreement(local *ccrypto.ECKey, localId string, remote *ccrypto.EC
 	}
 }
 
+func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, localHello *helloMsg) (*keyExchangeMsg, error) {
+	// 产生 RA 放到 kxm 的 key 中
+	RA, err := ka.ctxLocal.Prepare()
+	if err != nil {
+		return nil, err
+	}
+	ka.kxmLocal = new(keyExchangeMsg)
+	ka.kxmLocal.key = make([]byte, 1+len(RA))
+	ka.kxmLocal.key[0] = byte(len(RA))
+	copy(ka.kxmLocal.key[1:], RA)
+
+	return ka.kxmLocal, nil
+}
+
 // 这本来就是 sm2 交换的密钥处理逻辑函数，无需考虑兼容性
 func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, hello *helloMsg, remoteHello *helloMsg, kxm *keyExchangeMsg) error {
 	// 第一部分：验证临时公钥
@@ -66,7 +78,8 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, hello *hello
 	}
 
 	// 在这里基于ka新建curve
-	sm2Curve := ecdh_curve.NewSm2P256V1(true)
+	// 谁 id 大谁是 initiator
+	sm2Curve := ecdh_curve.NewSm2P256V1(ka.localId > ka.remoteId)
 
 	// publicKey 是 RB
 	publicLen := int(kxm.key[3])
@@ -108,12 +121,12 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, hello *hello
 	// 把 RB 放到 PublicKey 结构体里面
 	peerKey, err := key.Curve().NewPublicKey(publicKey)
 	if err != nil {
-		return errServerKeyExchange
+		return errKeyExchange
 	}
 
 	ka.preMasterSecret, err = key.ECDH(peerKey)
 	if err != nil {
-		return errServerKeyExchange
+		return errKeyExchange
 	}
 
 	// 把自己的临时公钥做成 clientKeyExchangeMsg【放到下面去！】
@@ -158,52 +171,27 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, hello *hello
 	return nil
 }
 
-func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, clientHello *helloMsg, cert *x509.Certificate) ([]byte, *keyExchangeMsg, error) {
-	// 把上面函数里面关于生成ckx的逻辑移到这边来
-	// 并且在 doFullHnadshake 函数中先调用这个函数，把自己的信息发出去，再处理对方的
-	// 因为此时密钥套件已经选定了，所以依据协商出的密码套件进行生成，而不是依据对方发送的 ServerKeyExchange 中的信息
-	// if ka.ckx == nil {
-	// 	return nil, nil, errors.New("tls: missing ServerKeyExchange message")
-	// }
+// func (k *sm2KeyAgreement) Prepare(remotePub *ccrypto.ECKey, remoteId string, initiator bool, doChecksum bool) ([]byte, error) {
 
-	// return ka.preMasterSecret, ka.ckx, nil
+// 	if err := k.ctxLocal.Init(k.localStaticPrivateKey, k.localId, remotePub, remoteId, initiator, doChecksum); err != nil {
+// 		fmt.Println("SM2 KAP failed")
+// 		return nil, err
+// 	}
 
-	// 生成本地临时公钥对后面放到外面去才对称
+// 	RA, err := k.ctxLocal.Prepare()
+// 	if err != nil {
+// 		fmt.Println("SM2 KAP failed")
+// 		return nil, err
+// 	}
+// 	return RA, nil
+// }
 
-	// ourPublicKey := key.PublicKey().Bytes()
-	RA, err := ka.ctxLocal.Prepare()
-	if err != nil {
-		return nil, nil, err
-	}
-	ka.kxmLocal = new(keyExchangeMsg)
-	ka.kxmLocal.key = make([]byte, 1+len(RA))
-	ka.kxmLocal.key[0] = byte(len(RA))
-	copy(ka.kxmLocal.key[1:], RA)
+// func (k *sm2KeyAgreement) ComputeKey(remotePoint []byte) ([]byte, []byte, error) {
 
-	return RA, ka.kxmLocal, nil
-}
-
-func (k *sm2KeyAgreement) Prepare(remotePub *ccrypto.ECKey, remoteId string, initiator bool, doChecksum bool) ([]byte, error) {
-
-	if err := k.ctxLocal.Init(k.localStaticPrivateKey, k.localId, remotePub, remoteId, initiator, doChecksum); err != nil {
-		fmt.Println("SM2 KAP failed")
-		return nil, err
-	}
-
-	RA, err := k.ctxLocal.Prepare()
-	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return nil, err
-	}
-	return RA, nil
-}
-
-func (k *sm2KeyAgreement) ComputeKey(remotePoint []byte) ([]byte, []byte, error) {
-
-	keyLocal, csLocal, err := k.ctxLocal.ComputeKey(remotePoint, k.keyLen)
-	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return nil, nil, err
-	}
-	return keyLocal, csLocal, nil
-}
+// 	keyLocal, csLocal, err := k.ctxLocal.ComputeKey(remotePoint, k.keyLen)
+// 	if err != nil {
+// 		fmt.Println("SM2 KAP failed")
+// 		return nil, nil, err
+// 	}
+// 	return keyLocal, csLocal, nil
+// }

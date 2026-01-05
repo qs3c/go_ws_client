@@ -248,18 +248,33 @@ func (hs *handshakeState) pickCipherSuite() error {
 }
 
 func (hs *handshakeState) doFullHandshake() error {
+	// 要保证的是 hs 上的逻辑是统一的
+	// 但是内部 ka 上的逻辑是不用统一的
 	c := hs.c
 
+	keyAgreement := hs.suite.ka
+
+	// 先发自己的 keyExchangeMsg
+	localKxm, err := keyAgreement.generateLocalKeyExchange(c.config, hs.helloMsg)
+	if err != nil {
+		c.out.setErrorLocked(errors.New("alertInternalError"))
+		return err
+	}
+	if localKxm != nil {
+		if _, err := hs.c.writeHandshakeRecord(localKxm, &hs.finishedHash); err != nil {
+			return err
+		}
+	}
+
+	// 在收对方的 keyExchangeMsg
 	msg, err := c.readHandshake(&hs.finishedHash)
 	if err != nil {
 		return err
 	}
-
-	keyAgreement := hs.suite.ka
-
 	remoteKxm, ok := msg.(*keyExchangeMsg)
+	var preMasterSecret []byte
 	if ok {
-		err = keyAgreement.processServerKeyExchange(c.config, hs.hello, hs.serverHello, c.peerCertificates[0], skx)
+		preMasterSecret, err = keyAgreement.processRemoteKeyExchange(c.config, hs.helloMsg, hs.remoteHelloMsg, remoteKxm)
 		if err != nil {
 			c.out.setErrorLocked(errors.New("alertIllegalParameter"))
 			return err
@@ -279,19 +294,7 @@ func (hs *handshakeState) doFullHandshake() error {
 		return c.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
 	}
 
-	preMasterSecret, localKxm, err := keyAgreement.generateClientKeyExchange(c.config)
-	if err != nil {
-		c.out.setErrorLocked(errors.New("alertInternalError"))
-		return err
-	}
-	if localKxm != nil {
-		if _, err := hs.c.writeHandshakeRecord(localKxm, &hs.finishedHash); err != nil {
-			return err
-		}
-	}
-
-	hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret,
-		hs.helloMsg.random, hs.remoteHelloMsg.random)
+	hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random)
 
 	hs.finishedHash.discardHandshakeBuffer()
 
@@ -302,7 +305,7 @@ func (hs *handshakeState) establishKeys() error {
 	c := hs.c
 
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
-		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.hello.random, hs.serverHello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
+		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
 	var clientCipher, serverCipher any
 	var clientHash, serverHash hash.Hash
 	if hs.suite.cipher != nil {
@@ -321,6 +324,12 @@ func (hs *handshakeState) establishKeys() error {
 }
 
 func (hs *handshakeState) sendFinished(out []byte) error {
+	c := hs.c
+
+	if err := c.writeChangeCipherRecord(); err != nil {
+		return err
+	}
+
 	finished := new(finishedMsg)
 	finished.verifyData = hs.finishedHash.localSum(hs.masterSecret)
 	if _, err := hs.c.writeHandshakeRecord(finished, &hs.finishedHash); err != nil {
@@ -332,6 +341,10 @@ func (hs *handshakeState) sendFinished(out []byte) error {
 
 func (hs *handshakeState) readFinished(out []byte) error {
 	c := hs.c
+
+	if err := c.readChangeCipherSpec(); err != nil {
+		return err
+	}
 
 	// finishedMsg is included in the transcript, but not until after we
 	// check the client version, since the state before this message was

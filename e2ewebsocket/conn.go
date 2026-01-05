@@ -106,6 +106,14 @@ func (c *Conn) Read(b []byte) (int, error) {
 }
 
 func (c *Conn) readRecord() error {
+	return c.readRecordOrCCS(false)
+}
+
+func (c *Conn) readChangeCipherSpec() error {
+	return c.readRecordOrCCS(true)
+}
+
+func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	//readRecordOrCCS 从连接中读取一个 TLS 记录【特殊情况触发重试时多读1个】，并更新记录层状态。
 
 	// 是否已出现过 read 错误
@@ -176,20 +184,48 @@ func (c *Conn) readRecord() error {
 
 	// 处理 TLS 应用数据记录
 	case recordTypeApplicationData:
-		if !handshakeComplete {
+		if !handshakeComplete || expectChangeCipherSpec {
 			return c.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
 		}
 		if len(data) == 0 {
+			// todo：retryReadRecord
+			// return c.retryReadRecord(expectChangeCipherSpec)
 			return errors.New("empty application data record")
 		}
 		c.input.Reset(data)
 
 	// 处理 TLS 握手记录
 	case recordTypeHandshake:
-		if len(data) == 0 {
+		if len(data) == 0 || expectChangeCipherSpec {
 			return errors.New("alertUnexpectedMessage")
 		}
 		c.hand.Write(data)
+
+	case recordTypeChangeCipherSpec:
+		// todo : 扩展为可携带 sm2 的 cs 数据【感觉可以通过hand传递过去，然后在readFinished中处理】
+		if len(data) != 1 || data[0] != 1 {
+			return c.in.setErrorLocked(errors.New("alertDecodeError"))
+		}
+		// Handshake messages are not allowed to fragment across the CCS.
+		if c.hand.Len() > 0 {
+			return c.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		}
+		// In TLS 1.3, change_cipher_spec records are ignored until the
+		// Finished. See RFC 8446, Appendix D.4. Note that according to Section
+		// 5, a server can send a ChangeCipherSpec before its ServerHello, when
+		// c.vers is still unset. That's not useful though and suspicious if the
+		// server then selects a lower protocol version, so don't allow that.
+		// if c.vers == VersionTLS13 {
+		// 	return c.retryReadRecord(expectChangeCipherSpec)
+		// }
+		if !expectChangeCipherSpec {
+			return c.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		}
+		// 变更 in 的密码套件
+		if err := c.in.changeCipherSpec(); err != nil {
+			return c.in.setErrorLocked(errors.New("change cipher failed!"))
+		}
+
 	}
 
 	return nil
@@ -311,7 +347,7 @@ func (c *Conn) writeHandshakeRecord(msg handshakeMessage, transcript transcriptH
 }
 
 func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
-	// writeRecordLocked 写入记录，这里的 type 只能是握手或者应用了
+	// writeRecordLocked 写入记录，这里的 type 只能是握手/应用/变更密码
 	if len(data) == 0 {
 		return 0, errors.New("zero length write")
 	}
@@ -553,6 +589,13 @@ func (c *Conn) handleRenegotiation() error {
 		c.handshakes++
 	}
 	return c.handshakeErr
+}
+
+func (c *Conn) writeChangeCipherRecord() error {
+	c.out.Lock()
+	defer c.out.Unlock()
+	_, err := c.writeRecordLocked(recordTypeChangeCipherSpec, []byte{1})
+	return err
 }
 
 // ===========================================================================
