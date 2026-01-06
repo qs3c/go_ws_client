@@ -280,7 +280,7 @@ func (hs *handshakeState) doFullHandshake() error {
 	keyAgreement := hs.suite.ka
 
 	// 先发自己的 keyExchangeMsg
-	localKxm, err := keyAgreement.generateLocalKeyExchange(c.config, hs.helloMsg)
+	localKxm, err := keyAgreement.generateLocalKeyExchange(c.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg)
 	if err != nil {
 		c.out.setErrorLocked(errors.New("alertInternalError"))
 		return err

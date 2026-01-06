@@ -7,6 +7,9 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
+
+	ccrypto "github.com/albert/ws_client/crypto"
+	"github.com/albert/ws_client/crypto/sm2tongsuo"
 )
 
 // 分离签名方案中的签名算法和哈希算法
@@ -36,8 +39,8 @@ func typeAndHashFromSignatureScheme(signatureAlgorithm SignatureScheme) (sigType
 		hash = crypto.SHA512
 	case Ed25519:
 		hash = directSigning
-	// case SM2WithSM3:
-	// 	hash = ccrypto.SM3
+	case SM2WithSM3:
+		hash = ccrypto.SM3
 	default:
 		return 0, 0, fmt.Errorf("unsupported signature algorithm: %v", signatureAlgorithm)
 	}
@@ -79,7 +82,17 @@ func verifyHandshakeSignature(sigType uint8, pubkey crypto.PublicKey, hashFunc c
 		if err := rsa.VerifyPSS(pubKey, hashFunc, signed, sig, signOpts); err != nil {
 			return err
 		}
-	// case signatureSM2:
+	case signatureSM2:
+		// pubKey, ok := pubkey.(*ccrypto.EVPPublicKey)
+		// 可以把一个接口断言成另一个接口，进行类型转换的，不只是把接口断言成结构体or结构体指针
+		pubKey, ok := pubkey.(ccrypto.EVPPublicKey)
+		if !ok {
+			return fmt.Errorf("expected an SM2 public key, got %T", pubkey)
+		}
+		err := sm2tongsuo.VerifyASN1(pubKey, signed, sig)
+		if err != nil {
+			return err
+		}
 
 	default:
 		return errors.New("internal error: unknown signature type")

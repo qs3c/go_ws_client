@@ -36,12 +36,12 @@
 // 	return go_write_bio_write(b, (char*)str, (int)strlen(str));
 // }
 
-// const EVP_MD *X_EVP_sm3() {
-// 	return EVP_sm3();
-// }
+const EVP_MD *X_EVP_sm3() {
+	return EVP_sm3();
+}
 
-// const int X_ED25519_SUPPORT = 1;
-// int X_EVP_PKEY_ED25519 = EVP_PKEY_ED25519;
+const int X_ED25519_SUPPORT = 1;
+int X_EVP_PKEY_ED25519 = EVP_PKEY_ED25519;
 
 int X_EVP_Digest(const void *data, size_t count,
 		unsigned char *md, unsigned int *size,
@@ -358,6 +358,10 @@ int X_EVP_PKEY_set1_RSA(EVP_PKEY *pkey, struct rsa_st *key) {
 
 int X_EVP_PKEY_assign_charp(EVP_PKEY *pkey, int type, char *key) {
 	return EVP_PKEY_assign(pkey, type, key);
+}
+
+EC_KEY *X_EVP_PKEY_get1_EC_KEY(EVP_PKEY *pkey) {
+	return EVP_PKEY_get1_EC_KEY(pkey);
 }
 
 int X_EVP_CIPHER_block_size(EVP_CIPHER *c) {

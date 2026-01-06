@@ -83,6 +83,7 @@ extern int X_EVP_PKEY_size(EVP_PKEY *pkey);
 extern struct rsa_st *X_EVP_PKEY_get1_RSA(EVP_PKEY *pkey);
 extern int X_EVP_PKEY_set1_RSA(EVP_PKEY *pkey, struct rsa_st *key);
 extern int X_EVP_PKEY_assign_charp(EVP_PKEY *pkey, int type, char *key);
+extern EC_KEY *X_EVP_PKEY_get1_EC_KEY(EVP_PKEY *pkey);
 extern int X_EVP_DigestVerifyInit(EVP_MD_CTX *ctx, EVP_PKEY_CTX **pctx, const EVP_MD *type, ENGINE *e, EVP_PKEY *pkey);
 extern int X_EVP_DigestVerifyUpdate(EVP_MD_CTX *ctx, const void *d, size_t cnt);
 extern int X_EVP_DigestVerifyFinal(EVP_MD_CTX *ctx, const unsigned char *sig, size_t siglen);
