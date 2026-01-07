@@ -44,11 +44,11 @@ var (
 	ErrInvalidKeySize      = errors.New("invalid key size")
 )
 
-func init() {
-	if rc := C.X_tscrypto_init(); rc != 0 {
-		panic(fmt.Sprintf("X_tscrypto_init failed with %d", rc))
-	}
-}
+// func init() {
+// 	if rc := C.X_tscrypto_init(); rc != 0 {
+// 		panic(fmt.Sprintf("X_tscrypto_init failed with %d", rc))
+// 	}
+// }
 
 // PopError needs to run in the same OS thread as the operation
 // that caused the possible error

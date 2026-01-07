@@ -32,9 +32,9 @@
 // extern int go_init_locks();
 // extern void go_thread_locking_callback(int, int, const char*, int);
 // extern unsigned long go_thread_id_callback();
-// static int go_write_bio_puts(BIO *b, const char *str) {
-// 	return go_write_bio_write(b, (char*)str, (int)strlen(str));
-// }
+static int go_write_bio_puts(BIO *b, const char *str) {
+	return go_write_bio_write(b, (char*)str, (int)strlen(str));
+}
 
 const EVP_MD *X_EVP_sm3() {
 	return EVP_sm3();
@@ -116,17 +116,17 @@ void X_EVP_MD_CTX_free(EVP_MD_CTX* ctx) {
 	EVP_MD_CTX_free(ctx);
 }
 
-// static int x_bio_create(BIO *b) {
-// 	BIO_set_shutdown(b, 1);
-// 	BIO_set_init(b, 1);
-// 	BIO_set_data(b, NULL);
-// 	BIO_clear_flags(b, ~0);
-// 	return 1;
-// }
+static int x_bio_create(BIO *b) {
+	BIO_set_shutdown(b, 1);
+	BIO_set_init(b, 1);
+	BIO_set_data(b, NULL);
+	BIO_clear_flags(b, ~0);
+	return 1;
+}
 
-// static int x_bio_free(BIO *b) {
-// 	return 1;
-// }
+static int x_bio_free(BIO *b) {
+	return 1;
+}
 
 static BIO_METHOD *writeBioMethod;
 static BIO_METHOD *readBioMethod;
@@ -134,47 +134,47 @@ static BIO_METHOD *readBioMethod;
 BIO_METHOD* BIO_s_readBio() { return readBioMethod; }
 BIO_METHOD* BIO_s_writeBio() { return writeBioMethod; }
 
-// int x_bio_init_methods() {
-// 	writeBioMethod = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "Go Write BIO");
-// 	if (!writeBioMethod) {
-// 		return 1;
-// 	}
-// 	if (1 != BIO_meth_set_write(writeBioMethod,
-// 				(int (*)(BIO *, const char *, int))go_write_bio_write)) {
-// 		return 2;
-// 	}
-// 	if (1 != BIO_meth_set_puts(writeBioMethod, go_write_bio_puts)) {
-// 		return 3;
-// 	}
-// 	if (1 != BIO_meth_set_ctrl(writeBioMethod, go_write_bio_ctrl)) {
-// 		return 4;
-// 	}
-// 	if (1 != BIO_meth_set_create(writeBioMethod, x_bio_create)) {
-// 		return 5;
-// 	}
-// 	if (1 != BIO_meth_set_destroy(writeBioMethod, x_bio_free)) {
-// 		return 6;
-// 	}
+int x_bio_init_methods() {
+	writeBioMethod = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "Go Write BIO");
+	if (!writeBioMethod) {
+		return 1;
+	}
+	if (1 != BIO_meth_set_write(writeBioMethod,
+				(int (*)(BIO *, const char *, int))go_write_bio_write)) {
+		return 2;
+	}
+	if (1 != BIO_meth_set_puts(writeBioMethod, go_write_bio_puts)) {
+		return 3;
+	}
+	if (1 != BIO_meth_set_ctrl(writeBioMethod, go_write_bio_ctrl)) {
+		return 4;
+	}
+	if (1 != BIO_meth_set_create(writeBioMethod, x_bio_create)) {
+		return 5;
+	}
+	if (1 != BIO_meth_set_destroy(writeBioMethod, x_bio_free)) {
+		return 6;
+	}
 
-// 	readBioMethod = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "Go Read BIO");
-// 	if (!readBioMethod) {
-// 		return 7;
-// 	}
-// 	if (1 != BIO_meth_set_read(readBioMethod, go_read_bio_read)) {
-// 		return 8;
-// 	}
-// 	if (1 != BIO_meth_set_ctrl(readBioMethod, go_read_bio_ctrl)) {
-// 		return 9;
-// 	}
-// 	if (1 != BIO_meth_set_create(readBioMethod, x_bio_create)) {
-// 		return 10;
-// 	}
-// 	if (1 != BIO_meth_set_destroy(readBioMethod, x_bio_free)) {
-// 		return 11;
-// 	}
+	readBioMethod = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "Go Read BIO");
+	if (!readBioMethod) {
+		return 7;
+	}
+	if (1 != BIO_meth_set_read(readBioMethod, go_read_bio_read)) {
+		return 8;
+	}
+	if (1 != BIO_meth_set_ctrl(readBioMethod, go_read_bio_ctrl)) {
+		return 9;
+	}
+	if (1 != BIO_meth_set_create(readBioMethod, x_bio_create)) {
+		return 10;
+	}
+	if (1 != BIO_meth_set_destroy(readBioMethod, x_bio_free)) {
+		return 11;
+	}
 
-// 	return 0;
-// }
+	return 0;
+}
 
 const EVP_MD *X_EVP_dss() {
 	return NULL;

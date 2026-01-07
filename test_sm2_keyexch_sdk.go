@@ -1,32 +1,33 @@
-////go:build testsdk
+//go:build testsdk
 
 package main
 
 import (
 	"fmt"
 
+	ccrypto "github.com/albert/ws_client/crypto"
 	"github.com/albert/ws_client/crypto/sm2keyexch"
 )
 
 func main() {
 	// 测试 sm2 密钥交换
 	// test sdk
-	local, err := sm2keyexch.NewECKeySM2()
+	local, err := ccrypto.NewECKeySM2()
 	if err != nil {
 		fmt.Println("SM2 KAP failed")
 		return
 	}
-	remote, err := sm2keyexch.NewECKeySM2()
+	remote, err := ccrypto.NewECKeySM2()
 	if err != nil {
 		fmt.Println("SM2 KAP failed")
 		return
 	}
-	localPub, err := sm2keyexch.NewECKeySM2()
+	localPub, err := ccrypto.NewECKeySM2()
 	if err != nil {
 		fmt.Println("SM2 KAP failed")
 		return
 	}
-	remotePub, err := sm2keyexch.NewECKeySM2()
+	remotePub, err := ccrypto.NewECKeySM2()
 	if err != nil {
 		fmt.Println("SM2 KAP failed")
 		return
@@ -126,7 +127,7 @@ func main() {
 	printHex("Serialized Private Key: ", privBytes)
 	fmt.Printf("len(privBytes): %d\n", len(privBytes))
 	// 2. Deserialize Private Key
-	newLocal, err := sm2keyexch.NewECKeyFromPrivateKey(privBytes)
+	newLocal, err := ccrypto.NewECKeyFromPrivateKey(privBytes)
 	if err != nil {
 		fmt.Printf("NewECKeyFromPrivateKey failed: %v\n", err)
 		return
@@ -155,7 +156,7 @@ func main() {
 	printHex("Serialized Public Key: ", pubBytes)
 	fmt.Printf("len(pubBytes): %d\n", len(pubBytes))
 	// 4. Deserialize Public Key
-	newPub, err := sm2keyexch.NewECKeyFromPublicKey(pubBytes)
+	newPub, err := ccrypto.NewECKeyFromPublicKey(pubBytes)
 	if err != nil {
 		fmt.Printf("NewECKeyFromPublicKey failed: %v\n", err)
 		return

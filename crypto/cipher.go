@@ -247,6 +247,10 @@ type decryptionCipherCtx struct {
 	*cipherCtx
 }
 
+type Engine struct {
+	e *C.ENGINE
+}
+
 func newEncryptionCipherCtx(cipher *Cipher, e *Engine, key, iv []byte) (
 	*encryptionCipherCtx, error,
 ) {
@@ -260,9 +264,10 @@ func newEncryptionCipherCtx(cipher *Cipher, e *Engine, key, iv []byte) (
 		return nil, err
 	}
 	var eptr *C.ENGINE
-	if e != nil {
-		eptr = e.Engine()
-	}
+	eptr = nil
+	// if e != nil {
+	// 	eptr = e.Engine()
+	// }
 	// 通过 EVP_CIPHER_CTX 和 EVP_CIPHER 来初始化
 	if C.EVP_EncryptInit_ex(ctx.ctx, cipher.ptr, eptr, nil, nil) != 1 {
 		return nil, PopError()
@@ -287,9 +292,10 @@ func newDecryptionCipherCtx(cipher *Cipher, e *Engine, key, iv []byte) (
 		return nil, err
 	}
 	var eptr *C.ENGINE
-	if e != nil {
-		eptr = e.Engine()
-	}
+	eptr = nil
+	// if e != nil {
+	// 	eptr = e.Engine()
+	// }
 	if C.EVP_DecryptInit_ex(ctx.ctx, cipher.ptr, eptr, nil, nil) != 1 {
 		return nil, PopError()
 	}

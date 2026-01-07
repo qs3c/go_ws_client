@@ -8,14 +8,14 @@ package sm3tongsuo
 import "C"
 
 import (
-	"crypto"
+	// "crypto"
 	"errors"
 	"fmt"
 	"hash"
 	"runtime"
 	"unsafe"
 
-	ccrypto "github.com/albert/ws_client/crypto"
+	// ccrypto "github.com/albert/ws_client/crypto"
 )
 
 // 封闭式的你注册不进去

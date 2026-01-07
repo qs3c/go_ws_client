@@ -1,4 +1,4 @@
-////go:build client
+//go:build client
 
 package main
 
@@ -18,7 +18,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
-
 )
 
 var configPath string

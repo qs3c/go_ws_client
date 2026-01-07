@@ -12,7 +12,6 @@ import (
 	"fmt"
 
 	"github.com/albert/ws_client/crypto"
-
 )
 
 const (
@@ -332,6 +331,6 @@ func (ctx *sm4Encrypter) SetPadding(pad bool) {
 	ctx.cctx.SetPadding(pad)
 }
 
-func (b *Block) Decrypt(dst, src []byte) {
-	sm4.Decrypt(dst, src, b.key)
-}
+// func (b *Block) Decrypt(dst, src []byte) {
+// 	sm4.Decrypt(dst, src, b.key)
+// }

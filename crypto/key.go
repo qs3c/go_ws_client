@@ -65,6 +65,7 @@ const (
 	KeyTypeSM2     = NidSM2
 )
 
+// 提供两个核心功能：加密+验证签名；和若干转密钥文件功能；
 type EVPPublicKey interface {
 	// VerifyPKCS1v15 verifies the data signature using PKCS1.15
 	VerifyPKCS1v15(method Method, data, sig []byte) error
@@ -96,6 +97,7 @@ type EVPPublicKey interface {
 	EvpPKey() *C.EVP_PKEY
 }
 
+// 提供两个核心功能：解密+签名；和转公钥功能+若干转密钥文件功能；
 type EVPPrivateKey interface {
 	EVPPublicKey
 
@@ -700,3 +702,187 @@ func (key *pKey) ToECKey() (*ECKey, error) {
 
 	return &ECKey{ptr: ecKeyPtr}, nil
 }
+
+// bio.go 部分
+
+// type anyBio C.BIO
+
+// func asAnyBio(b *C.BIO) *anyBio { return (*anyBio)(b) }
+
+// func (bio *anyBio) Read(buf []byte) (int, error) {
+// 	if len(buf) == 0 {
+// 		return 0, nil
+// 	}
+// 	n := int(C.X_BIO_read((*C.BIO)(bio), unsafe.Pointer(&buf[0]), C.int(len(buf))))
+// 	if n <= 0 {
+// 		return 0, io.EOF
+// 	}
+// 	return n, nil
+// }
+
+// func (bio *anyBio) Write(buf []byte) (int, error) {
+// 	if len(buf) == 0 {
+// 		return 0, nil
+// 	}
+// 	ret := int(C.X_BIO_write((*C.BIO)(bio), unsafe.Pointer(&buf[0]),
+// 		C.int(len(buf))))
+// 	if ret < 0 {
+// 		return 0, fmt.Errorf("BIO write failed: %w", PopError())
+// 	}
+// 	if ret < len(buf) {
+// 		return ret, fmt.Errorf("BIO write trucated: %w", ErrPartialWrite)
+// 	}
+// 	return ret, nil
+// }
+
+// //export go_write_bio_write
+// func go_write_bio_write(bio *C.BIO, data *C.char, size C.int) C.int {
+// 	var rc C.int
+
+// 	defer func() {
+// 		if err := recover(); err != nil {
+// 			// logger.Critf("openssl: writeBioWrite panic'd: %v", err)
+// 			rc = -1
+// 		}
+// 	}()
+// 	// 从 C BIO 中获取 GO WriteBio 指针
+// 	ptr := loadWritePtr(bio)
+// 	if ptr == nil || data == nil || size < 0 {
+// 		return -1
+// 	}
+
+// 	// 上 GO WriteBio 数据锁
+// 	ptr.dataMtx.Lock()
+// 	defer ptr.dataMtx.Unlock()
+
+// 	// 重置 C BIO 状态，清除重试标志
+// 	bioClearRetryFlags(bio)
+// 	// 把 C BIO 的数据转化为 Go 字节切片追加到 GO WriteBio 的缓冲区
+// 	ptr.buf = append(ptr.buf, nonCopyCString(data, size)...)
+// 	rc = size
+
+// 	return rc
+// }
+
+// //export go_write_bio_ctrl
+// func go_write_bio_ctrl(bio *C.BIO, cmd C.int, arg1 C.long, arg2 unsafe.Pointer) C.long {
+// 	_, _ = arg1, arg2 // unused
+
+// 	var rc C.long
+
+// 	// 使用 defer 和 recover 捕获潜在的 panic，防止Go panic传播到 C 代码
+// 	// 发生 panic 时返回 -1
+// 	defer func() {
+// 		if err := recover(); err != nil {
+// 			// logger.Critf("openssl: writeBioCtrl panic'd: %v", err)
+// 			rc = -1
+// 		}
+// 	}()
+
+// 	switch cmd {
+
+// 	// 查询 BIO 中待处理（待写入）的数据量，调用 writeBioPending 函数获取
+// 	case C.BIO_CTRL_WPENDING:
+// 		rc = writeBioPending(bio)
+// 	// 处理 BIO_CTRL_DUP 和 BIO_CTRL_FLUSH 命令，返回 1 表示成功
+// 	case C.BIO_CTRL_DUP, C.BIO_CTRL_FLUSH:
+// 		rc = 1
+// 	default:
+// 		rc = 0
+// 	}
+
+// 	return rc
+// }
+
+// //export go_read_bio_read
+// func go_read_bio_read(bio *C.BIO, data *C.char, size C.int) C.int {
+// 	rc := 0
+
+// 	defer func() {
+// 		if err := recover(); err != nil {
+// 			// logger.Critf("openssl: go_read_bio_read panic'd: %v", err)
+// 			rc = -1
+// 		}
+// 	}()
+
+// 	ptr := loadReadPtr(bio)
+// 	if ptr == nil || size < 0 {
+// 		return -1
+// 	}
+
+// 	ptr.dataMtx.Lock()
+// 	defer ptr.dataMtx.Unlock()
+
+// 	// 清除重试标记
+// 	bioClearRetryFlags(bio)
+
+// 	if len(ptr.buf) == 0 {
+// 		// 如果 buf 中没有数据，并且 eof 标志为 true
+// 		// 则返回 0 表示已没有数据可读
+// 		if ptr.eof {
+// 			return 0
+// 		}
+// 		// 如果 buf 中没有数据，且 eof 标志为 false
+// 		// 则设置重试读取标志并返回 -1
+// 		// 表示需要等待数据来了再读
+// 		bioSetRetryRead(bio)
+// 		return -1
+// 	}
+// 	// 当请求读取 0 字节或目标缓冲区为 nil 时
+// 	// 返回当前可用数据量而不进行实际读取
+// 	if size == 0 || data == nil {
+// 		return C.int(len(ptr.buf))
+// 	}
+// 	// 创建指向 C 缓冲区的 Go 切片视图
+// 	// 将数据从 Go ReadBio 缓冲区复制到 C 缓冲区的 Go 切片视图中
+// 	rc = copy(nonCopyCString(data, size), ptr.buf)
+// 	// 从 Go ReadBio 缓冲区中删除已读取的数据
+// 	// 把未读取的数据前移，并把后面多余的截掉
+// 	ptr.buf = ptr.buf[:copy(ptr.buf, ptr.buf[rc:])]
+// 	// 如果允许 release 并且 ReadBio 的 buf 被读空了
+// 	// 就设置 buf 为 nil
+// 	if ptr.releaseBuffers && len(ptr.buf) == 0 {
+// 		ptr.buf = nil
+// 	}
+// 	return C.int(rc)
+// }
+
+// //export go_read_bio_ctrl
+// func go_read_bio_ctrl(bio *C.BIO, cmd C.int, arg1 C.long, arg2 unsafe.Pointer) C.long {
+// 	_, _ = arg1, arg2 // unused
+
+// 	var rc C.long
+// 	defer func() {
+// 		if err := recover(); err != nil {
+// 			// logger.Critf("openssl: readBioCtrl panic'd: %v", err)
+// 			rc = -1
+// 		}
+// 	}()
+
+// 	switch cmd {
+// 	// 获取 Go ReadBio 剩余数据的长度
+// 	case C.BIO_CTRL_PENDING:
+// 		rc = readBioPending(bio)
+// 	case C.BIO_CTRL_DUP, C.BIO_CTRL_FLUSH:
+// 		rc = 1
+// 	default:
+// 		rc = 0
+// 	}
+
+// 	return rc
+// }
+
+// type WriteBio struct {
+// 	dataMtx        sync.Mutex
+// 	opMtx          sync.Mutex
+// 	buf            []byte
+// 	releaseBuffers bool
+// }
+
+// func loadWritePtr(b *C.BIO) *WriteBio {
+// 	// 从 C BIO 中获取 token
+// 	t := token(C.X_BIO_get_data(b))
+
+// 	// 从 WriteBio 映射表获取对应的 GO WriteBio 地址
+// 	return (*WriteBio)(writeBioMapping.Get(t))
+// }

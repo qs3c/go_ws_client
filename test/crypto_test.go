@@ -4,7 +4,15 @@ import (
 	"fmt"
 	"testing"
 
+	"bytes"
+	"crypto/rand"
+	"encoding/hex" // Added for hex.EncodeToString
+
+	ccrypto "github.com/albert/ws_client/crypto"
 	"github.com/albert/ws_client/crypto/sm2keyexch"
+	"github.com/albert/ws_client/crypto/sm2tongsuo"
+	"github.com/albert/ws_client/crypto/sm3tongsuo" // Added as per instruction
+	"github.com/albert/ws_client/crypto/sm4tongsuo"
 )
 
 func TestCryptoTools_Free(t *testing.T) {
@@ -31,22 +39,22 @@ func TestCryptoTools_Free(t *testing.T) {
 
 func TestCryptoTools_SM2_KeyExchange(t *testing.T) {
 
-	local, err := sm2keyexch.NewECKeySM2()
+	local, err := ccrypto.NewECKeySM2()
 	if err != nil {
 		fmt.Println("SM2 KAP failed")
 		return
 	}
-	remote, err := sm2keyexch.NewECKeySM2()
+	remote, err := ccrypto.NewECKeySM2()
 	if err != nil {
 		fmt.Println("SM2 KAP failed")
 		return
 	}
-	localPub, err := sm2keyexch.NewECKeySM2()
+	localPub, err := ccrypto.NewECKeySM2()
 	if err != nil {
 		fmt.Println("SM2 KAP failed")
 		return
 	}
-	remotePub, err := sm2keyexch.NewECKeySM2()
+	remotePub, err := ccrypto.NewECKeySM2()
 	if err != nil {
 		fmt.Println("SM2 KAP failed")
 		return
@@ -146,7 +154,7 @@ func TestCryptoTools_SM2_KeyExchange(t *testing.T) {
 	printHex("Serialized Private Key: ", privBytes)
 	fmt.Printf("len(privBytes): %d\n", len(privBytes))
 	// 2. Deserialize Private Key
-	newLocal, err := sm2keyexch.NewECKeyFromPrivateKey(privBytes)
+	newLocal, err := ccrypto.NewECKeyFromPrivateKey(privBytes)
 	if err != nil {
 		fmt.Printf("NewECKeyFromPrivateKey failed: %v\n", err)
 		return
@@ -175,7 +183,7 @@ func TestCryptoTools_SM2_KeyExchange(t *testing.T) {
 	printHex("Serialized Public Key: ", pubBytes)
 	fmt.Printf("len(pubBytes): %d\n", len(pubBytes))
 	// 4. Deserialize Public Key
-	newPub, err := sm2keyexch.NewECKeyFromPublicKey(pubBytes)
+	newPub, err := ccrypto.NewECKeyFromPublicKey(pubBytes)
 	if err != nil {
 		fmt.Printf("NewECKeyFromPublicKey failed: %v\n", err)
 		return
@@ -194,6 +202,163 @@ func TestCryptoTools_SM2_KeyExchange(t *testing.T) {
 	} else {
 		fmt.Println(">> Public Key Mismatch!")
 	}
+}
+
+func TestCryptoTools_SM2(t *testing.T) {
+	// 1. Generate Key
+	priv, err := sm2tongsuo.GenerateKey()
+	if err != nil {
+		t.Fatal("GenerateKey failed:", err)
+	}
+	t.Log("SM2 operations GenerateKey verified")
+	// Note: priv uses runtime.SetFinalizer for cleanup, no explicit Free() needed based on key.go implementation
+
+	msg := []byte("test message for sm2")
+
+	// 2. SignASN1 / VerifyASN1
+	sig, err := sm2tongsuo.SignASN1(priv, msg)
+	if err != nil {
+		t.Fatal("SignASN1 failed:", err)
+	}
+
+	// priv implements EVPPrivateKey which embeds EVPPublicKey, so it can be used directly
+	// pub := priv.Public() 可以转成公钥，但是私钥包含了公钥及其全部功能
+	// EVPPrivate 接口是包含 EVPPublic 接口的，所以这里可以直接输入 priv 不用转换
+	if err := sm2tongsuo.VerifyASN1(priv, msg, sig); err != nil {
+		t.Fatal("VerifyASN1 failed:", err)
+	}
+	t.Log("SM2 operations SignASN1/VerifyASN1 verified")
+
+	// 3. Sign / Verify (BigInt)
+	r, s, err := sm2tongsuo.Sign(priv, msg)
+	if err != nil {
+		t.Fatal("Sign failed:", err)
+	}
+	if err := sm2tongsuo.Verify(priv, msg, r, s); err != nil {
+		t.Fatal("Verify failed:", err)
+	}
+	t.Log("SM2 operations Sign/Verify verified")
+
+	// 4. Encrypt / Decrypt
+	ciphertext, err := sm2tongsuo.Encrypt(priv, msg)
+	if err != nil {
+		t.Fatal("Encrypt failed:", err)
+	}
+
+	plaintext, err := sm2tongsuo.Decrypt(priv, ciphertext)
+	if err != nil {
+		t.Fatal("Decrypt failed:", err)
+	}
+
+	if !bytes.Equal(msg, plaintext) {
+		t.Errorf("Decrypt mismatch. Got %x, want %x", plaintext, msg)
+	}
+
+	t.Log("SM2 operations Enc/Dec verified")
+}
+
+func TestCryptoTools_SM3(t *testing.T) {
+	// 1. One-shot hash test
+	data := []byte("abc")
+	// Standard SM3("abc") = 66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0
+	expected := "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0"
+
+	sum := sm3tongsuo.Sum(data)
+	// 32 字节数组转为 16 进制字符串
+	sumHex := hex.EncodeToString(sum[:])
+	if sumHex != expected {
+		t.Errorf("SM3 Sum mismatch. Got %s, want %s", sumHex, expected)
+	} else {
+		t.Log("SM3 Sum('abc') verified")
+	}
+
+	// 2. Streaming hash test
+	h := sm3tongsuo.NewSM3()
+	if h == nil {
+		t.Fatal("NewSM3 failed")
+	}
+	h.Write([]byte("a"))
+	h.Write([]byte("b"))
+	h.Write([]byte("c"))
+	streamingSum := h.Sum(nil)
+	streamingHex := hex.EncodeToString(streamingSum)
+
+	if streamingHex != expected {
+		t.Errorf("SM3 Streaming mismatch. Got %s, want %s", streamingHex, expected)
+	} else {
+		t.Log("SM3 Streaming('abc') verified")
+	}
+
+	// 可接续加入
+	h.Write([]byte("e"))
+	h.Write([]byte("f"))
+	h.Write([]byte("g"))
+	streamingSum2 := h.Sum(nil)
+	streamingHex2 := hex.EncodeToString(streamingSum2)
+
+	sum2 := sm3tongsuo.Sum([]byte("abcefg"))
+	sumHex2 := hex.EncodeToString(sum2[:])
+
+	if streamingHex2 != sumHex2 {
+		t.Error("SM3 forward Streaming failed.")
+	} else {
+		t.Log("SM3 Streaming('abcefg') verified")
+	}
+
+	// 3. Reset test
+	h.Reset()
+	h.Write([]byte("abc"))
+	resetSum := h.Sum(nil)
+	resetHex := hex.EncodeToString(resetSum)
+	if resetHex != expected {
+		t.Errorf("SM3 Reset mismatch. Got %s, want %s", resetHex, expected)
+	} else {
+		t.Log("SM3 Reset usage verified")
+	}
+}
+
+func TestCryptoTools_SM4_AEAD(t *testing.T) {
+	key := make([]byte, 16)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	iv := make([]byte, 12)
+	if _, err := rand.Read(iv); err != nil {
+		t.Fatal(err)
+	}
+
+	plaintext := []byte("Hello SM4 GCM Mode")
+	aad := []byte("Additional Auth Data")
+
+	// 1. Encryption
+	encAEAD := sm4tongsuo.NewSm4AEADCipher(key, iv, true)
+	if encAEAD == nil {
+		t.Fatal("NewSm4AEADCipher (Encrypt) failed")
+	}
+
+	// nonce is handled internally via iv passed to New, so we pass nil here
+	ciphertext := encAEAD.Seal(nil, nil, plaintext, aad)
+	if len(ciphertext) == 0 {
+		t.Fatal("Encryption failed, empty ciphertext")
+	}
+	t.Logf("Ciphertext len: %d", len(ciphertext))
+
+	// 2. Decryption
+	decAEAD := sm4tongsuo.NewSm4AEADCipher(key, iv, false)
+	if decAEAD == nil {
+		t.Fatal("NewSm4AEADCipher (Decrypt) failed")
+	}
+
+	decrypted, err := decAEAD.Open(nil, nil, ciphertext, aad)
+	if err != nil {
+		t.Fatalf("Decryption failed: %v", err)
+	}
+
+	if !bytes.Equal(plaintext, decrypted) {
+		t.Fatalf("Decryption mismatch. Got %x, want %x", decrypted, plaintext)
+	}
+
+	t.Log("SM4 GCM Encryption/Decryption Success")
 }
 
 func printHex(label string, buf []byte) {

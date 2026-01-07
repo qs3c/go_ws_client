@@ -26,9 +26,10 @@
 #include <openssl/ec.h>
 #include <openssl/opensslv.h>
 #include <openssl/sm4.h>
+#include <openssl/bn.h>
 
 /* shim  methods */
-extern int X_tscrypto_init();
+// extern int X_tscrypto_init();
 
 /* Library methods */
 extern void X_OPENSSL_free(void *ref);
