@@ -311,6 +311,7 @@ func (hs *handshakeState) doFullHandshake() error {
 
 	}
 
+	// sm2 的 initiator 逻辑影响到了外面，hs得有状态记录
 	hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random)
 
 	hs.finishedHash.discardHandshakeBuffer()
@@ -320,6 +321,8 @@ func (hs *handshakeState) doFullHandshake() error {
 
 func (hs *handshakeState) establishKeys() error {
 	c := hs.c
+	// 到这里你就发现sm2印象的不是只ka内部的逻辑了
+	// 甚至是影响到了外面，这里关于keys的生成
 
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
 		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)

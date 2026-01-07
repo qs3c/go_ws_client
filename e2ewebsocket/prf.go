@@ -16,18 +16,18 @@ const finishedVerifyLength = 12
 const masterSecretLabel = "master secret"
 const keyExpansionLabel = "key expansion"
 
-func masterFromPreMasterSecret(version uint16, suite *cipherSuite, preMasterSecret, clientRandom, serverRandom []byte) []byte {
-	seed := make([]byte, 0, len(clientRandom)+len(serverRandom))
-	seed = append(seed, clientRandom...)
-	seed = append(seed, serverRandom...)
+func masterFromPreMasterSecret(version uint16, suite *cipherSuite, preMasterSecret, initiatorRandom, responderRandom []byte) []byte {
+	seed := make([]byte, 0, len(initiatorRandom)+len(responderRandom))
+	seed = append(seed, initiatorRandom...)
+	seed = append(seed, responderRandom...)
 
 	return prf(suite)(preMasterSecret, masterSecretLabel, seed, masterSecretLength)
 }
 
-func keysFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clientRandom, serverRandom []byte, macLen, keyLen, ivLen int) (clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV []byte) {
-	seed := make([]byte, 0, len(serverRandom)+len(clientRandom))
-	seed = append(seed, serverRandom...)
-	seed = append(seed, clientRandom...)
+func keysFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, initiatorRandom, responderRandom []byte, macLen, keyLen, ivLen int) (clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV []byte) {
+	seed := make([]byte, 0, len(responderRandom)+len(initiatorRandom))
+	seed = append(seed, responderRandom...)
+	seed = append(seed, initiatorRandom...)
 
 	n := 2*macLen + 2*keyLen + 2*ivLen
 	keyMaterial := prf(suite)(masterSecret, keyExpansionLabel, seed, n)
