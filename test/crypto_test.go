@@ -15,28 +15,6 @@ import (
 	"github.com/albert/ws_client/crypto/sm4tongsuo"
 )
 
-func TestCryptoTools_Free(t *testing.T) {
-	t.Log("Free")
-	fmt.Println("Free")
-	// t.Run("Free", func(t *testing.T) {
-	// 	t.Log("Free")
-	// })
-}
-
-// func TestCryptoTools_PKtrans(t *testing.T) {
-
-// 	pkey, err := crypto.GenerateECKey(crypto.SM2Curve)
-// 	if err != nil {
-// 		fmt.Println("1")
-// 		return
-// 	}
-// 	_, err = crypto.ToECKey(pkey)
-// 	if err != nil {
-// 		fmt.Println("2")
-// 		return
-// 	}
-// }
-
 func TestCryptoTools_SM2_KeyExchange(t *testing.T) {
 
 	local, err := ccrypto.NewECKeySM2()
@@ -359,6 +337,30 @@ func TestCryptoTools_SM4_AEAD(t *testing.T) {
 	}
 
 	t.Log("SM4 GCM Encryption/Decryption Success")
+}
+
+func TestCryptoTools_PKEYtoECKEY(t *testing.T) {
+	// 1. Generate an SM2 Key (which is a pKey underlying)
+	priv, err := ccrypto.GenerateECKey(ccrypto.SM2Curve)
+	if err != nil {
+		t.Fatal("Failed to generate SM2 key:", err)
+	}
+
+	// 2. Convert to ECKey using ToECKey
+	ecKey, err := ccrypto.ToECKey(priv)
+	if err != nil {
+		t.Fatalf("ToECKey failed: %v", err)
+	}
+
+	// 3. Verify the result
+	if ecKey == nil {
+		t.Fatal("ToECKey returned nil")
+	}
+
+	// Optional: Check if the EC_KEY pointer is valid (not null)
+	// We can't access internal fields directly easily if they are private,
+	// but if no error returned, it should be fine.
+	t.Log("Successfully converted pKey to ECKey")
 }
 
 func printHex(label string, buf []byte) {

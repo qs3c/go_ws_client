@@ -39,8 +39,16 @@ type sm2KeyAgreement struct {
 
 func NewSM2KeyAgreement(local ccrypto.EVPPrivateKey, localId string, remote ccrypto.EVPPrivateKey, remoteId string) *sm2KeyAgreement {
 	// 这里要处理sm2的 eckey与pkey兼容问题，方式是 pkey 转 eckey
+	localECKEY, err := ccrypto.ToECKey(local)
+	if err != nil {
+		return nil
+	}
+	remoteECKEY, err := ccrypto.ToECKey(remote)
+	if err != nil {
+		return nil
+	}
 	ctxLocal := sm2keyexch.NewKAPCtx()
-	if err := ctxLocal.Init(local, localId, remote, remoteId, localId > remoteId, true); err != nil {
+	if err := ctxLocal.Init(localECKEY, localId, remoteECKEY, remoteId, localId > remoteId, true); err != nil {
 		return nil
 	}
 	return &sm2KeyAgreement{

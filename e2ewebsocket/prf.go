@@ -2,10 +2,12 @@ package e2ewebsocket
 
 import (
 	"crypto"
-	"crypto/internal/fips140/tls12"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
 	"hash"
+
+	"github.com/albert/ws_client/crypto/sm3tongsuo"
 )
 
 const masterSecretLength = 48
@@ -51,16 +53,49 @@ func prf(suite *cipherSuite) prfFunc {
 func prfAndHash(suite *cipherSuite) (prfFunc, crypto.Hash) {
 
 	if suite.flags&suiteSHA384 != 0 {
-		return prf12(sha512.New384), crypto.SHA384
+		return prfFromHash(sha512.New384), crypto.SHA384
 	}
-	return prf12(sha256.New), crypto.SHA256
+	// 新增
+	if suite.flags&suiteSM3 != 0 {
+		return prfFromHash(sm3tongsuo.NewSM3), sm3tongsuo.SM3HASH
+	}
+	return prfFromHash(sha256.New), crypto.SHA256
 
 }
 
 type prfFunc func(secret []byte, label string, seed []byte, keyLen int) []byte
 
-func prf12(hashFunc func() hash.Hash) prfFunc {
+func prfFromHash(hashFunc func() hash.Hash) prfFunc {
 	return func(secret []byte, label string, seed []byte, keyLen int) []byte {
-		return tls12.PRF(hashFunc, secret, label, seed, keyLen)
+		return PRF(hashFunc, secret, label, seed, keyLen)
+	}
+}
+
+func PRF(hash func() hash.Hash, secret []byte, label string, seed []byte, keyLen int) []byte {
+	labelAndSeed := make([]byte, len(label)+len(seed))
+	copy(labelAndSeed, label)
+	copy(labelAndSeed[len(label):], seed)
+
+	result := make([]byte, keyLen)
+	pHash(hash, result, secret, labelAndSeed)
+	return result
+}
+
+func pHash(hash func() hash.Hash, result, secret, seed []byte) {
+	h := hmac.New(hash, secret)
+	h.Write(seed)
+	a := h.Sum(nil)
+
+	for len(result) > 0 {
+		h.Reset()
+		h.Write(a)
+		h.Write(seed)
+		b := h.Sum(nil)
+		n := copy(result, b)
+		result = result[n:]
+
+		h.Reset()
+		h.Write(a)
+		a = h.Sum(nil)
 	}
 }

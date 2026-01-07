@@ -9,12 +9,12 @@ import "C"
 
 import (
 	// "crypto"
+	"crypto"
 	"errors"
 	"fmt"
 	"hash"
 	"runtime"
 	"unsafe"
-
 	// ccrypto "github.com/albert/ws_client/crypto"
 )
 
@@ -22,6 +22,10 @@ import (
 // func init() {
 // 	crypto.RegisterHash(ccrypto.SM3, NewSM3)
 // }
+
+const (
+	SM3HASH crypto.Hash = 50
+)
 
 const (
 	MDSize    = 32
