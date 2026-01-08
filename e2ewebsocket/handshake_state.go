@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"internal/byteorder"
 	"io"
 )
 
@@ -40,8 +39,11 @@ import (
 // }
 
 type handshakeState struct {
-	c               *Conn
-	ctx             context.Context
+	c *Conn
+
+	localId  string
+	remoteId string
+
 	helloMsg        *helloMsg
 	remoteHelloMsg  *helloMsg
 	suite           *cipherSuite
@@ -87,7 +89,6 @@ func (c *Conn) symHandshake(ctx context.Context) (err error) {
 	// 后续如果改到 Session 下，相当于每个握手 Session 都有自己独立的 handshakeState
 	hs := &handshakeState{
 		c:              c,
-		ctx:            ctx,
 		helloMsg:       hello,
 		remoteHelloMsg: remoteHello,
 	}
@@ -186,7 +187,7 @@ func (hs *handshakeState) handshake() error {
 		return err
 	}
 
-	hs.finishedHash = newFinishedHash(hs.suite)
+	hs.finishedHash = newFinishedHash(hs.suite, hs.localId, hs.remoteId)
 
 	if err := transcriptMsg(hs.helloMsg, &hs.finishedHash); err != nil {
 		return err
@@ -259,7 +260,11 @@ func (hs *handshakeState) pickCipherSuite() error {
 	if hs.suite = mutualCipherSuite(hs.helloMsg.cipherSuites, hs.remoteHelloMsg.cipherSuites); hs.suite == nil {
 		return hs.c.out.setErrorLocked(errors.New("tls: server chose an unconfigured cipher suite"))
 	}
-	// todo: 如果是国密这里suite的ka要特殊构造
+	// todo: 如果是国密这里suite的ka要特殊构造(也不一定要在这里)
+	// if sm2ka, ok := hs.suite.ka.(*sm2KeyAgreement); ok {
+	// 	sm2ka.localId = hs.localId
+	// 	sm2ka.remoteId = hs.remoteId
+	// }
 	hs.c.cipherSuite = hs.suite.id
 	return nil
 }
@@ -279,6 +284,17 @@ func (hs *handshakeState) doFullHandshake() error {
 
 	keyAgreement := hs.suite.ka
 
+	// 不在 pick 密钥套件那边构造，在这里完善sm2ka
+	// 而采用这种补充的方法，之前的那个New方法其实就用处不大了
+	if sm2ka, ok := hs.suite.ka.(*sm2KeyAgreement); ok {
+		sm2ka.localId = hs.localId
+		sm2ka.remoteId = hs.remoteId
+		// 现在才加载静态公钥，还是初始化的时候就加载到hs里面，然后现在从hs拿可以考虑一下
+		// 路径应该从哪里获取，全局变量还是config中？
+		sm2ka.localStaticPrivateKey = ccrypto.LoadPrivateKeyFileFromPEM(hs.c.config.staticPrivateKeyFile)
+		sm2ka.remoteStaticPublicKey = ccrypto.LoadPublicKeyFileFromPEM(hs.c.config.staticPublicKeyFile)
+
+	}
 	// 先发自己的 keyExchangeMsg
 	localKxm, err := keyAgreement.generateLocalKeyExchange(c.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg)
 	if err != nil {
@@ -306,7 +322,7 @@ func (hs *handshakeState) doFullHandshake() error {
 		}
 		// 获取曲线并记录
 		if len(remoteKxm.key) >= 3 && remoteKxm.key[0] == 3 /* named curve */ {
-			c.curveID = CurveID(byteorder.BEUint16(remoteKxm.key[1:]))
+			c.curveID = CurveID(BEUint16(remoteKxm.key[1:]))
 		}
 
 	}
@@ -314,7 +330,7 @@ func (hs *handshakeState) doFullHandshake() error {
 	// sm2 的 initiator 逻辑影响到了外面，hs得有状态记录
 	hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random)
 
-	hs.finishedHash.discardHandshakeBuffer()
+	// hs.finishedHash.discardHandshakeBuffer()
 
 	return nil
 }

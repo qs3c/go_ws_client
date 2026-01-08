@@ -18,6 +18,7 @@ import "C"
 import (
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"unsafe"
 )
@@ -886,3 +887,43 @@ func (key *pKey) ToECKey() (*ECKey, error) {
 // 	// 从 WriteBio 映射表获取对应的 GO WriteBio 地址
 // 	return (*WriteBio)(writeBioMapping.Get(t))
 // }
+
+func LoadPrivateKeyFileFromPEM(path string) (EVPPrivateKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadPrivateKeyFromPEM(data)
+}
+
+func LoadPrivateKeyFileFromPEMWithPassword(path, password string) (EVPPrivateKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadPrivateKeyFromPEMWithPassword(data, password)
+}
+
+func LoadPrivateKeyFileFromDER(path string) (EVPPrivateKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadPrivateKeyFromDER(data)
+}
+
+func LoadPublicKeyFileFromPEM(path string) (EVPPublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadPublicKeyFromPEM(data)
+}
+
+func LoadPublicKeyFileFromDER(path string) (EVPPublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadPublicKeyFromDER(data)
+}

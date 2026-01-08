@@ -3,7 +3,7 @@ package e2ewebsocket
 import (
 	"fmt"
 
-	"vendor/golang.org/x/crypto/cryptobyte"
+	"golang.org/x/crypto/cryptobyte"
 )
 
 type helloMsg struct {

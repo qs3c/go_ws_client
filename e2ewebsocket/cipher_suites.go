@@ -1,7 +1,10 @@
 package e2ewebsocket
 
 import (
+	"crypto/cipher"
 	"hash"
+
+	"github.com/albert/ws_client/crypto/sm4tongsuo"
 )
 
 // ciphersuite 的 flags 字段与对象
@@ -100,8 +103,9 @@ var cipherSuitesPreferenceOrder = []uint16{
 	E2E_MLKEMSM2_WITH_SM4_512_GCM_SM3,
 }
 
+// 目前密码套件仅一种实现
 var cipherSuites = map[uint16]*cipherSuite{
-	E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3: {E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3, 16, 0, 4, sm2KA, suiteTLS12, nil, nil, aeadSM4GCM},
+	E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3: {E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3, 16, 0, 4, sm2KA, suiteTLS12, nil, nil, sm4tongsuo.NewSm4AEADCipher},
 }
 
 type cipherSuite struct {
@@ -116,7 +120,7 @@ type cipherSuite struct {
 	flags  int
 	cipher func(key, iv []byte, isRead bool) any
 	mac    func(key []byte) hash.Hash
-	aead   func(key, fixedNonce []byte) aead
+	aead   func(key, fixedNonce []byte) cipher.AEAD
 }
 
 // var cipherSuites = []*cipherSuite{ // TODO: replace with a map, since the order doesn't matter.
@@ -201,6 +205,14 @@ func cipherSuiteByID(id uint16) *cipherSuite {
 	return suite
 }
 
-func sm2KA(version uint16) keyAgreement {
-	return sm2KeyAgreement{}
-}
+var sm2KA = &sm2KeyAgreement{}
+
+// func sm2KA(version uint16) keyAgreement {
+// 	return &sm2KeyAgreement{}
+// }
+
+// ok已经知道了，ciphersuite中的ka就是一个keyAgreement实例，并不是ka的id什么的
+// 不像 cipher+mac 或者 aead，他们是在 cipher 中不是实例，而是根据入参（密钥,随机值之类的）返回对应实例的函数
+// 所以我在协商pickciphersuite套件的时候，就要把ka初始化好
+// 冲突，但是pickciphersuite的时候，其实是从已经提前预备好的 ciphersuites 列表里面去找
+// 而 sm2 的特点是无法提前预备好！因为不知道id信息，预备半好试试

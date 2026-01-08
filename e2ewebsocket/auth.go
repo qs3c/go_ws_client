@@ -10,6 +10,7 @@ import (
 
 	ccrypto "github.com/albert/ws_client/crypto"
 	"github.com/albert/ws_client/crypto/sm2tongsuo"
+	"github.com/albert/ws_client/crypto/sm3tongsuo"
 )
 
 // 分离签名方案中的签名算法和哈希算法
@@ -40,7 +41,7 @@ func typeAndHashFromSignatureScheme(signatureAlgorithm SignatureScheme) (sigType
 	case Ed25519:
 		hash = directSigning
 	case SM2WithSM3:
-		hash = ccrypto.SM3
+		hash = sm3tongsuo.SM3HASH
 	default:
 		return 0, 0, fmt.Errorf("unsupported signature algorithm: %v", signatureAlgorithm)
 	}

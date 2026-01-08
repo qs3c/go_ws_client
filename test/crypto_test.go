@@ -308,26 +308,24 @@ func TestCryptoTools_SM4_AEAD(t *testing.T) {
 	plaintext := []byte("Hello SM4 GCM Mode")
 	aad := []byte("Additional Auth Data")
 
-	// 1. Encryption
-	encAEAD := sm4tongsuo.NewSm4AEADCipher(key, iv, true)
-	if encAEAD == nil {
-		t.Fatal("NewSm4AEADCipher (Encrypt) failed")
+	// 1. Create AEAD
+	// Note: The current implementation of NewSm4AEADCipher binds the IV at creation time.
+	// This returns a cipher.AEAD that can do both Seal and Open.
+	aead := sm4tongsuo.NewSm4AEADCipher(key, iv)
+	if aead == nil {
+		t.Fatal("NewSm4AEADCipher failed")
 	}
 
+	// 2. Encryption
 	// nonce is handled internally via iv passed to New, so we pass nil here
-	ciphertext := encAEAD.Seal(nil, nil, plaintext, aad)
+	ciphertext := aead.Seal(nil, nil, plaintext, aad)
 	if len(ciphertext) == 0 {
 		t.Fatal("Encryption failed, empty ciphertext")
 	}
 	t.Logf("Ciphertext len: %d", len(ciphertext))
 
-	// 2. Decryption
-	decAEAD := sm4tongsuo.NewSm4AEADCipher(key, iv, false)
-	if decAEAD == nil {
-		t.Fatal("NewSm4AEADCipher (Decrypt) failed")
-	}
-
-	decrypted, err := decAEAD.Open(nil, nil, ciphertext, aad)
+	// 3. Decryption
+	decrypted, err := aead.Open(nil, nil, ciphertext, aad)
 	if err != nil {
 		t.Fatalf("Decryption failed: %v", err)
 	}

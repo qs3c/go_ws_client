@@ -3,7 +3,6 @@ package e2ewebsocket
 import (
 	"crypto"
 	"crypto/rand"
-	"internal/godebug"
 	"io"
 	"slices"
 )
@@ -196,12 +195,12 @@ func (c *Config) curvePreferences(version uint16) []CurveID {
 	return curvePreferences
 }
 
-var isMlkem = godebug.New("mlkem")
+// var isMlkem = godebug.New("mlkem")
 
 func defaultCurvePreferences() []CurveID {
-	if isMlkem.Value() == "0" {
-		return []CurveID{X25519, CurveP256, CurveP384, CurveP521}
-	}
+	// if isMlkem.Value() == "0" {
+	// 	return []CurveID{X25519, CurveP256, CurveP384, CurveP521}
+	// }
 	return []CurveID{X25519MLKEM768, X25519, CurveP256, CurveP384, CurveP521}
 }
 

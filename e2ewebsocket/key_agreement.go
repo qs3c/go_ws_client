@@ -9,13 +9,14 @@ import (
 	"github.com/albert/ws_client/crypto/ecdh_curve"
 	"github.com/albert/ws_client/crypto/sm2keyexch"
 	"github.com/albert/ws_client/crypto/sm2tongsuo"
+	"github.com/albert/ws_client/crypto/sm3tongsuo"
 )
 
 var errKeyExchange = errors.New("invalid KeyExchange message")
 
 type keyAgreement interface {
-	generateLocalKeyExchange(config *Config, signatureScheme SignatureScheme, hello *helloMsg, remoteHello *helloMsg) (*keyExchangeMsg, error)
-	processRemoteKeyExchange(config *Config, signatureScheme SignatureScheme, hello *helloMsg, remoteHello *helloMsg, kxm *keyExchangeMsg) ([]byte, error)
+	generateLocalKeyExchange(*Config, SignatureScheme, *helloMsg, *helloMsg) (*keyExchangeMsg, error)
+	processRemoteKeyExchange(*Config, SignatureScheme, *helloMsg, *helloMsg, *keyExchangeMsg) ([]byte, error)
 }
 
 // type keyAgreement interface {
@@ -24,8 +25,7 @@ type keyAgreement interface {
 // }
 
 type sm2KeyAgreement struct {
-	version         uint16
-	preMasterSecret []byte
+
 	// localStaticPrivateKey *ccrypto.ECKey
 	// remoteStaticPublicKey *ccrypto.ECKey
 	localStaticPrivateKey ccrypto.EVPPrivateKey
@@ -33,7 +33,9 @@ type sm2KeyAgreement struct {
 	localId               string
 	remoteId              string
 	ctxLocal              *sm2keyexch.KAPCtx
-	kxmLocal              *keyExchangeMsg
+
+	kxmLocal        *keyExchangeMsg
+	preMasterSecret []byte
 	// keyLen                int
 }
 
@@ -88,9 +90,9 @@ func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, signatureSch
 	// initiator 的随机值在前
 	var signed []byte
 	if ka.localId > ka.remoteId {
-		signed = hashForKeyExchange(sigType, sigHash, ka.version, hello.random, remoteHello.random, localECDHEParams)
+		signed = hashForKeyExchange(sigType, sigHash, hello.random, remoteHello.random, localECDHEParams)
 	} else {
-		signed = hashForKeyExchange(sigType, sigHash, ka.version, remoteHello.random, hello.random, localECDHEParams)
+		signed = hashForKeyExchange(sigType, sigHash, remoteHello.random, hello.random, localECDHEParams)
 	}
 	signature, err := sm2tongsuo.SignASN1(ka.localStaticPrivateKey, signed)
 	if err != nil {
@@ -224,9 +226,9 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	var signed []byte
 	// initiator 的随机值在前
 	if ka.localId > ka.remoteId {
-		signed = hashForKeyExchange(sigType, sigHash, ka.version, hello.random, remoteHello.random, remoteECDHEParams)
+		signed = hashForKeyExchange(sigType, sigHash, hello.random, remoteHello.random, remoteECDHEParams)
 	} else {
-		signed = hashForKeyExchange(sigType, sigHash, ka.version, remoteHello.random, hello.random, remoteECDHEParams)
+		signed = hashForKeyExchange(sigType, sigHash, remoteHello.random, hello.random, remoteECDHEParams)
 	}
 	if err := verifyHandshakeSignature(sigType, ka.remoteStaticPublicKey, sigHash, signed, sig); err != nil {
 		return nil, errors.New("invalid signature by the server certificate: " + err.Error())
@@ -258,7 +260,7 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 //		}
 //		return keyLocal, csLocal, nil
 //	}
-func hashForKeyExchange(sigType uint8, hashFunc crypto.Hash, version uint16, slices ...[]byte) []byte {
+func hashForKeyExchange(sigType uint8, hashFunc crypto.Hash, slices ...[]byte) []byte {
 	if sigType == signatureEd25519 {
 		var signed []byte
 		for _, slice := range slices {
@@ -270,7 +272,7 @@ func hashForKeyExchange(sigType uint8, hashFunc crypto.Hash, version uint16, sli
 		return sha1Hash(slices)
 	}
 	// SM3 特别处理
-	if hashFunc == ccrypto.SM3 {
+	if hashFunc == sm3tongsuo.SM3HASH {
 		// hash := sm3tongsuo.NewSM3()
 		// for _, slice := range slices {
 		// 	hash.Write(slice)

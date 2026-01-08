@@ -31,11 +31,88 @@ type AEAD interface {
 	ExplicitNonceLen() int
 }
 
-func NewSm4AEADCipher(key, iv []byte, isEncrypt bool) cipher.AEAD {
-	if isEncrypt {
-		return NewSm4AEADEncrypter(key, iv)
+// func NewSm4AEADCipher(key, iv []byte, isEncrypt bool) cipher.AEAD {
+// 	if isEncrypt {
+// 		return NewSm4AEADEncrypter(key, iv)
+// 	}
+// 	return NewSm4AEADDecrypter(key, iv)
+// }
+
+type sm4AEADCipher struct {
+	enc *sm4Encrypter
+	dec *sm4Decrypter
+}
+
+func NewSm4AEADCipher(key, iv []byte) cipher.AEAD {
+	enc, err := NewEncrypter(crypto.CipherModeGCM, key, iv)
+	if err != nil {
+		fmt.Printf("sm4AEADCipher NewSm4AEADCipher error [NewEncrypter]: %v", err)
+		return nil
 	}
-	return NewSm4AEADDecrypter(key, iv)
+	dec, err := NewDecrypter(crypto.CipherModeGCM, key, iv)
+	if err != nil {
+		fmt.Printf("sm4AEADCipher NewSm4AEADCipher error [NewDecrypter]: %v", err)
+		return nil
+	}
+	return &sm4AEADCipher{
+		enc: enc,
+		dec: dec,
+	}
+}
+
+func (c *sm4AEADCipher) Seal(dst, nonce, plaintext, aad []byte) []byte {
+	// 设置 AAD
+	c.enc.SetAAD(aad)
+	// 加密
+	ciphertext, err := c.enc.EncryptAll(plaintext)
+	if err != nil {
+		fmt.Printf("sm4AEADCipher Seal error [EncryptAll]: %v", err)
+		return nil
+	}
+	// 获取 tag
+	tag, err := c.enc.GetTag()
+	if err != nil {
+		fmt.Printf("sm4AEADCipher Seal error [GetTag]: %v", err)
+		return nil
+	}
+
+	ciphertext = append(ciphertext, tag...)
+	dst = append(dst, ciphertext...)
+	return dst
+}
+
+func (c *sm4AEADCipher) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error) {
+	// 设置 AAD
+	c.dec.SetAAD(aad)
+	tag := ciphertext[len(ciphertext)-c.Overhead():]
+
+	// 设置 tag
+	c.dec.SetTag(tag)
+
+	// 解密
+	plaintext, err := c.dec.DecryptAll(ciphertext[:len(ciphertext)-c.Overhead()])
+	if err != nil {
+		fmt.Printf("sm4AEADCipher Open error [DecryptAll]: %v", err)
+		return nil, err
+	}
+
+	return plaintext, nil
+}
+
+func (c *sm4AEADCipher) NonceSize() int {
+	// return len(e.enc.iv)
+	return 12
+}
+
+// 返回 tag 长度 GCM 是 16
+func (c *sm4AEADCipher) Overhead() int {
+	return 16
+}
+
+// 返回需要显示传输的 nonce 长度
+func (c *sm4AEADCipher) ExplicitNonceLen() int {
+	// 如果没有使用特别的技术，需要显示传输的 nonce 长度就是原本的 iv 长度
+	return c.NonceSize()
 }
 
 type sm4AEADEncrypter struct {
