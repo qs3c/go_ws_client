@@ -5,6 +5,9 @@ import (
 	"crypto/rand"
 	"io"
 	"slices"
+
+	"github.com/albert/ws_client/compressor"
+	"github.com/albert/ws_client/encoder"
 )
 
 const (
@@ -159,7 +162,15 @@ type Config struct {
 
 	CurvePreferences          []CurveID
 	SignatureSchemePreference []SignatureScheme
+
+	Compressor compressor.Compressor
+	Encoder    encoder.Encoder
 }
+
+// 压缩器
+// compressor := compressor.NewGzipCompressor()
+// 编码器【要用Gob】
+// encoder := encoder.NewGobEncoder()
 
 var emptyConfig Config
 
