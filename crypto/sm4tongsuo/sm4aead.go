@@ -22,14 +22,7 @@ import (
 
 // 基于 sm4Encrypter 和 sm4Decrypter 实现 aead 接口 【其实不实现也可以的】
 
-type AEAD interface {
-	cipher.AEAD
 
-	// explicitNonceLen returns the number of bytes of explicit nonce
-	// included in each record. This is eight for older AEADs and
-	// zero for modern ones.
-	ExplicitNonceLen() int
-}
 
 // func NewSm4AEADCipher(key, iv []byte, isEncrypt bool) cipher.AEAD {
 // 	if isEncrypt {

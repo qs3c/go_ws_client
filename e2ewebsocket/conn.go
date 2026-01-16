@@ -3,16 +3,14 @@ package e2ewebsocket
 import (
 	"errors"
 	"log"
+	"net/http"
+	"time"
 
-	"github.com/albert/ws_client/compressor"
-	"github.com/albert/ws_client/encoder"
 	"github.com/gorilla/websocket"
-	"github.com/openimsdk/protocol/sdkws"
-	"google.golang.org/protobuf/proto"
 )
 
 type Conn struct {
-	conn websocket.Conn
+	conn *websocket.Conn
 
 	hostId string
 
@@ -44,36 +42,57 @@ type Conn struct {
 }
 
 type readMsgItem struct {
-	msgType int
-	msg     []byte
-	err     error
+	sessionId string
+	remoteId  string
+	msgType   int
+	msg       []byte
+	err       error
 }
 
+type PingPongHandler func(string) error
+
 func (c *Conn) ReadMessage() (int, []byte, error) {
-	// 1. 优先从队列读取
-	if len(c.readQueue) > 0 {
-		item := c.readQueue[0]
-		// 移除头部元素 (切片操作)
-		c.readQueue = c.readQueue[1:]
-		// 如果因为底层数组太大而在意内存泄漏，可以在这里根据情况重建 slice，
-		// 但通常对于这种小队列没必要。
+	// 1. 优先从队列读取【其实这里总的来说都是二进制应用消息了，少有其他类型的消息，比如Close消息】
+	for len(c.readQueue) == 0 {
+		if err := c.readRecord(); err != nil {
+			return 0, nil, err
+		}
+		// 处理二次握手消息相关的逻辑要放到别的地方检查，不在这里了
+		// for c.hand.Len() > 0 {
+		// 	if err := c.handlePostHandshakeMessage(); err != nil {
+		// 		return 0,nil, err
+		// 	}
+		// }
+	}
+
+	item := c.readQueue[0]
+	c.readQueue = c.readQueue[1:]
+
+	if item.sessionId == "" {
+		// 说明不是二进制应用消息，直接返回给上层处理即可
 		return item.msgType, item.msg, item.err
 	}
 
-	// 2. 队列为空，从底层连接读取
-	msgType, msg, err := c.conn.ReadMessage()
-	// 除了二进制消息，其他都正常返回
-	if msgType != websocket.BinaryMessage {
-		return msgType, msg, err
+	// 是二进制应用消息，那么就拿出对应的session，可能存在第一次通信的情况，session并不存在
+	session := c.sessions[item.sessionId]
+	if session == nil {
+		// 初始化session
+		session = NewSession(item.sessionId, item.remoteId, c)
+		c.sessions[item.sessionId] = session
 	}
+	if err := session.Handshake(); err != nil {
+		log.Printf("session handshake failed: %v", err)
+	}
+	return item.msgType, item.msg, item.err
 
-	// 3. 这里是演示逻辑：假设某种情况下我们需要把读出来的消息放回队列
-	// 实际使用时，调用者会在外部判断，如果“读多了”或者“读到了握手包”，
-	// 会调用类似 unread / pushBack 的方法。
-	// 但既然 ReadMessage 接口定义如此，这里直接返回即可。
-	// 只有当有【握手逻辑】介入，且握手逻辑多读了数据时，才需要写入这个队列。
+}
 
-	return msgType, msg, err
+func (c *Conn) readRecord() error {
+	return c.readRecordOrCCS(false)
+}
+
+func (c *Conn) readChangeCipherSpec() error {
+	return c.readRecordOrCCS(true)
 }
 
 func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
@@ -86,7 +105,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	}
 	// 如果不是二进制类型的，正常传递给上层
 	if msgType != websocket.BinaryMessage {
-		c.readQueue = append(c.readQueue, readMsgItem{msgType: msgType, msg: msg, err: err})
+		c.readQueue = append(c.readQueue, readMsgItem{sessionId: "", remoteId: "", msgType: msgType, msg: msg, err: err})
 		return nil
 	}
 	// 如果是二进制类型的消息，那么要解析出记录类型、用户id等信息
@@ -94,10 +113,12 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 
 	// 解析 msg
 	typ := recordType(msg[0])
-	senderId, rawContentDatas, err := parseReceivedMsg(msg, c.config.Compressor, c.config.Encoder)
-	if err != nil {
-		return err
-	}
+	senderId := string(msg[1:11])
+
+	// senderId, rawContentDatas, err := parseReceivedMsg(msg, c.config.Compressor, c.config.Encoder)
+	// if err != nil {
+	// 	return err
+	// }
 
 	// 构造sessionId 并获取到对应的session
 	sessionId := getSessionID(c.hostId, senderId)
@@ -113,7 +134,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	handshakeComplete := session.isHandshakeComplete.Load()
 
 	// 校验结束，开始解密
-	data, err := session.in.decrypt(rawContentDatas[0])
+	data, err := session.in.decrypt(msg[11:])
 	if err != nil {
 		return session.in.setErrorLocked(errors.New("decrypt failed"))
 	}
@@ -124,7 +145,6 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	if session.in.cipher == nil && typ == recordTypeApplicationData {
 		return session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
 	}
-
 
 	// 处理不同类型的TLS记录
 	switch typ {
@@ -142,7 +162,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 			return errors.New("empty application data record")
 		}
 		// 将解密后的data 通过 readQueue 传递给上层
-		c.readQueue = append(c.readQueue, readMsgItem{msgType: msgType, msg: data, err: err})
+		c.readQueue = append(c.readQueue, readMsgItem{sessionId: sessionId, remoteId: senderId, msgType: msgType, msg: data, err: err})
 		return nil
 
 	// 处理 TLS 握手记录
@@ -174,49 +194,165 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	return nil
 }
 
-// 返回发送者的id和消息内容未解密的 rawContentData 列表，虽然是列表但是就一个数据一般
-func parseReceivedMsg(msg []byte, compressor compressor.Compressor, encoder encoder.Encoder) (string, [][]byte, error) {
+func (c *Conn) WriteMessage(messageType int, message []byte) error {
 
-	// 解压
-	decompressMsg, err := compressor.DecompressWithPool(msg)
+	// 似乎这里必须要写一段拆包逻辑来获取 receiveId
+	// 和服务端的拆包逻辑相同，和模拟客户端的打包逻辑相反
+	remoteId := string(message[1:11])
+	sessionId := getSessionID(c.hostId, remoteId)
+
+	session := c.sessions[sessionId]
+	if session == nil {
+		// 初始化session
+		session = NewSession(sessionId, remoteId, c)
+		c.sessions[sessionId] = session
+	}
+	// 看起来在 write 这边握手操作是可以前置的，因为他在写操作之前就可以知道是要给谁发
+	// 从而获取到对应 session，但是这样的话和某个用户之间的首次通信就会是一个握手数据，而不是应用数据【没有漏一条应用数据进行握手触发的效果】
+	// 就会和 read 那边的逻辑对不上，所以还是需要漏一个应用数据的
+	// 所以 write 这边的握手触发也要后置，先 write 一条再说
+
+	// 三种数据类型：应用、握手、CCS，这里肯定是应用来的
+
+	err := c.writeRecordLocked(recordTypeApplicationData, message, session)
 	if err != nil {
-		log.Printf("解压消息失败: %v", err)
-		return "", nil, err
+		return err
 	}
 
-	// 解码
-	var resp Resp
-	err = encoder.Decode(decompressMsg, &resp)
-	if err != nil {
-		log.Printf("解码消息失败: %v", err)
-		return "", nil, err
+	// 握手检查（握手确实要后置，但是session相关，即使是第一条消息，也会带session前缀所以session相关不后置）
+	if err := session.Handshake(); err != nil {
+		return err
 	}
 
-	var pushMsg sdkws.PushMessages
-	// 反序列化到 PushMessages 结构体
-	err = proto.Unmarshal(resp.Data, &pushMsg)
-	if err != nil {
-		log.Printf("反序列化消息失败: %v", err)
-		return "", nil, err
+	if err := session.out.err; err != nil {
+		return err
 	}
 
-	senderIds := make([]string, 0, 1)
-	// var senderIds string
-	rawContentList := make([][]byte, 0, 1)
-
-	msgMap := pushMsg.Msgs
-	// 虽然是循环，但是单聊的时候 map 里只会有一个会话
-	for _, pullMsg := range msgMap {
-		// 一个会话里可能有多个消息，但单聊的时候一般只有一个
-		for _, msgData := range pullMsg.Msgs {
-
-			// log.Printf("From会话[%s]收到消息: %s", conversationId, recvMsg.Content)
-			senderIds = append(senderIds, msgData.SendID)
-			rawContentList = append(rawContentList, msgData.Content)
-		}
+	if !session.isHandshakeComplete.Load() {
+		return errors.New("[Write] handshake not complete")
 	}
-	return senderIds[0], rawContentList, nil
+	return nil
 }
+
+// 现在还有必要使用 outBufPool 吗
+// 与 readRecord 同理 writeRecord由于被应用层和握手层调用，所以应该是会有并发问题的（又好像没有）
+func (c *Conn) writeRecordLocked(typ recordType, data []byte, session *Session) error {
+	// writeRecordLocked 写入记录，这里的 type 只能是握手/应用/变更密码
+	if len(data) == 0 {
+		return errors.New("zero length write")
+	}
+
+	// 直接分配内存，避免 sync.Pool 不当使用导致的 panic 风险和代码复杂度
+	// 头部格式：[1字节类型][10字节HostID]
+	outBuf := make([]byte, 11)
+	outBuf[0] = byte(typ)
+	copy(outBuf[1:11], c.hostId)
+
+	var err error
+	// encrypt 方法通常会将加密后的内容追加到 outBuf 后面
+	outBuf, err = session.out.encrypt(outBuf, data, c.config.rand())
+	if err != nil {
+		return err
+	}
+	err = c.conn.WriteMessage(websocket.BinaryMessage, outBuf)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Conn) Close() error {
+	return c.conn.Close()
+}
+
+func (c *Conn) SetReadDeadline(timeout time.Duration) error {
+	return c.conn.SetReadDeadline(time.Now().Add(timeout))
+}
+
+func (c *Conn) SetWriteDeadline(timeout time.Duration) error {
+	return c.conn.SetWriteDeadline(time.Now().Add(timeout))
+}
+
+func (c *Conn) SetReadLimit(limit int64) {
+	c.conn.SetReadLimit(limit)
+
+}
+
+func (c *Conn) SetPingHandler(handler PingPongHandler) {
+	c.conn.SetPingHandler(handler)
+}
+
+func (c *Conn) SetPongHandler(handler PingPongHandler) {
+	c.conn.SetPongHandler(handler)
+}
+
+func (c *Conn) LocalAddr() string {
+	return c.conn.LocalAddr().String()
+}
+
+// func NewWebSocket(connType int) *Default {
+// 	return &Default{ConnType: connType}
+// }
+
+func (c *Conn) Dial(urlStr string, requestHeader http.Header) (*http.Response, error) {
+	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
+	if err == nil {
+		c.conn = conn
+	}
+	return httpResp, err
+}
+
+func (c *Conn) IsNil() bool {
+	if c.conn != nil {
+		return false
+	}
+	return true
+}
+
+// 返回发送者的id和消息内容未解密的 rawContentData 列表，虽然是列表但是就一个数据一般
+// func parseReceivedMsg(msg []byte, compressor compressor.Compressor, encoder encoder.Encoder) (string, [][]byte, error) {
+
+// 	// 解压
+// 	decompressMsg, err := compressor.DecompressWithPool(msg)
+// 	if err != nil {
+// 		log.Printf("解压消息失败: %v", err)
+// 		return "", nil, err
+// 	}
+
+// 	// 解码
+// 	var resp Resp
+// 	err = encoder.Decode(decompressMsg, &resp)
+// 	if err != nil {
+// 		log.Printf("解码消息失败: %v", err)
+// 		return "", nil, err
+// 	}
+
+// 	var pushMsg sdkws.PushMessages
+// 	// 反序列化到 PushMessages 结构体
+// 	err = proto.Unmarshal(resp.Data, &pushMsg)
+// 	if err != nil {
+// 		log.Printf("反序列化消息失败: %v", err)
+// 		return "", nil, err
+// 	}
+
+// 	senderIds := make([]string, 0, 1)
+// 	// var senderIds string
+// 	rawContentList := make([][]byte, 0, 1)
+
+// 	msgMap := pushMsg.Msgs
+// 	// 虽然是循环，但是单聊的时候 map 里只会有一个会话
+// 	for _, pullMsg := range msgMap {
+// 		// 一个会话里可能有多个消息，但单聊的时候一般只有一个
+// 		for _, msgData := range pullMsg.Msgs {
+
+// 			// log.Printf("From会话[%s]收到消息: %s", conversationId, recvMsg.Content)
+// 			senderIds = append(senderIds, msgData.SendID)
+// 			rawContentList = append(rawContentList, msgData.Content)
+// 		}
+// 	}
+// 	return senderIds[0], rawContentList, nil
+// }
 
 func getSessionID(A, B string) string {
 	if A < B {
