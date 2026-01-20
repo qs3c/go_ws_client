@@ -76,9 +76,9 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 	// 是二进制应用消息，那么就拿出对应的session，可能存在第一次通信的情况，session并不存在
 	session := c.sessions[item.sessionId]
 	if session == nil {
-		// 初始化session
-		session = NewSession(item.sessionId, item.remoteId, c)
-		c.sessions[item.sessionId] = session
+		// 到这里的时候 session 不可能为 nil 了
+		// 如果是 nil 那么是有问题的
+		return 0, nil, errors.New("session not found")
 	}
 	if err := session.Handshake(); err != nil {
 		log.Printf("session handshake failed: %v", err)
@@ -124,7 +124,9 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	sessionId := getSessionID(c.hostId, senderId)
 	session := c.sessions[sessionId]
 	if session == nil {
-		return errors.New("session not found")
+		// session 创建逻辑应该在这里
+		session = NewSession(sessionId, senderId, c)
+		c.sessions[sessionId] = session
 	}
 	// 握手状态相关的校验，全部后置
 	if session.in.err != nil {
