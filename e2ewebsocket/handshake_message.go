@@ -54,8 +54,10 @@ func (m *helloMsg) marshal() ([]byte, error) {
 		return nil, err
 	}
 
+
+	// 构造hello消息主体
 	var b cryptobyte.Builder
-	// 后续 unmarshal 时会跳过这 8+32，4字节
+	// 后续 unmarshal 时会跳过这 8+24，4字节
 
 	// 1 消息类型
 	b.AddUint8(typeHelloMsg)
@@ -70,10 +72,10 @@ func (m *helloMsg) marshal() ([]byte, error) {
 				b.AddUint16(suite)
 			}
 		})
-		// 5 压缩方法
-		b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(m.compressionMethods)
-		})
+		// // 5 压缩方法
+		// b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
+		// 	b.AddBytes(m.compressionMethods)
+		// })
 		// 6 扩展
 		if len(extBytes) > 0 {
 			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
@@ -114,10 +116,10 @@ func (m *helloMsg) unmarshal(data []byte) bool {
 		}
 		m.cipherSuites = append(m.cipherSuites, suite)
 	}
-	// 读取 5压缩方法(1字节长度和n个1字节压缩方法列表)
-	if !readUint8LengthPrefixed(&s, &m.compressionMethods) {
-		return false
-	}
+	// // 读取 5压缩方法(1字节长度和n个1字节压缩方法列表)
+	// if !readUint8LengthPrefixed(&s, &m.compressionMethods) {
+	// 	return false
+	// }
 	// 读取 6扩展(2字节长度和n个2字节扩展列表)
 	if s.Empty() {
 		return true
@@ -183,6 +185,10 @@ func (m *helloMsg) unmarshal(data []byte) bool {
 	return true
 }
 
+func (m *helloMsg) originalBytes() []byte {
+	return m.original
+}
+
 // The marshalingFunction type is an adapter to allow the use of ordinary
 // functions as cryptobyte.MarshalingValue.
 type marshalingFunction func(b *cryptobyte.Builder) error
@@ -203,10 +209,6 @@ func addBytesWithLength(b *cryptobyte.Builder, v []byte, n int) {
 	}))
 }
 
-func readUint8LengthPrefixed(s *cryptobyte.String, out *[]byte) bool {
-	return s.ReadUint8LengthPrefixed((*cryptobyte.String)(out))
-}
-
 func readUint24LengthPrefixed(s *cryptobyte.String, out *[]byte) bool {
 	return s.ReadUint24LengthPrefixed((*cryptobyte.String)(out))
 }
@@ -216,6 +218,7 @@ type transcriptHash interface {
 }
 
 func transcriptMsg(msg handshakeMessage, h transcriptHash) error {
+	// 已经有自己的原始二进制，直接写入
 	if msgWithOrig, ok := msg.(handshakeMessageWithOriginalBytes); ok {
 		if orig := msgWithOrig.originalBytes(); orig != nil {
 			h.Write(msgWithOrig.originalBytes())
@@ -223,6 +226,7 @@ func transcriptMsg(msg handshakeMessage, h transcriptHash) error {
 		}
 	}
 
+	// 没有原始二进制，那就自己marshal再写入
 	data, err := msg.marshal()
 	if err != nil {
 		return err
@@ -245,6 +249,13 @@ func (m *keyExchangeMsg) marshal() ([]byte, error) {
 	copy(x[4:], m.key)
 
 	return x, nil
+
+	// var b cryptobyte.Builder
+    // b.AddUint8(typeKeyExchange)
+    // b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+    //     b.AddBytes(m.key)
+    // })
+    // return b.Bytes()
 }
 
 func (m *keyExchangeMsg) unmarshal(data []byte) bool {
@@ -255,17 +266,7 @@ func (m *keyExchangeMsg) unmarshal(data []byte) bool {
 	return true
 }
 
-// type helloDoneMsg struct{}
 
-// func (m *helloDoneMsg) marshal() ([]byte, error) {
-// 	x := make([]byte, 4)
-// 	x[0] = typeHelloDone
-// 	return x, nil
-// }
-
-// func (m *helloDoneMsg) unmarshal(data []byte) bool {
-// 	return len(data) == 4
-// }
 
 type finishedMsg struct {
 	verifyData []byte

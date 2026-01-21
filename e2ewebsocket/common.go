@@ -163,9 +163,14 @@ type Config struct {
 	CurvePreferences          []CurveID
 	SignatureSchemePreference []SignatureScheme
 
+	KeyStorePath string
+
 	Compressor compressor.Compressor
 	Encoder    encoder.Encoder
 }
+
+// 默认密钥存储路径：可以给一个系统路径，目前先用工作区路径
+var defaultKeyStorePath string = "./static_key"
 
 // 压缩器
 // compressor := compressor.NewGzipCompressor()
@@ -176,6 +181,27 @@ var emptyConfig Config
 
 func defaultConfig() *Config {
 	return &emptyConfig
+}
+
+func (c *Config) keyStorePath() string {
+	if c.KeyStorePath == "" {
+		return defaultKeyStorePath
+	}
+	return c.KeyStorePath
+}
+
+func (c *Config) compressor() compressor.Compressor {
+	if c.Compressor == nil {
+		return compressor.NewGzipCompressor()
+	}
+	return c.Compressor
+}
+
+func (c *Config) encoder() encoder.Encoder {
+	if c.Encoder == nil {
+		return encoder.NewGobEncoder()
+	}
+	return c.Encoder
 }
 
 func (c *Config) cipherSuites() []uint16 {
@@ -238,4 +264,9 @@ func (c *Config) defaultSupportedVersions() []uint16 {
 type handshakeMessage interface {
 	marshal() ([]byte, error)
 	unmarshal([]byte) bool
+}
+
+type handshakeMessageWithOriginalBytes interface {
+	handshakeMessage
+	originalBytes() []byte
 }

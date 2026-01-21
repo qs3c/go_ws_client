@@ -6,15 +6,20 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/albert/ws_client/compressor"
+	"github.com/albert/ws_client/encoder"
 	"github.com/gorilla/websocket"
+	"github.com/openimsdk/protocol/sdkws"
+	"google.golang.org/protobuf/proto"
 )
 
 type Conn struct {
-	conn *websocket.Conn
-
+	// 初始化需要提供的字段
+	conn   *websocket.Conn
 	hostId string
+	config *Config
 
-	sessions map[string]*Session
+	sessions map[SessionID]*Session
 
 	// 握手状态相关
 	// vers                uint16
@@ -37,12 +42,19 @@ type Conn struct {
 
 	// 缓冲区/队列相关
 	readQueue []readMsgItem
+}
 
-	config *Config
+func NewSecureConn(wsconn *websocket.Conn, hostId string, config *Config) *Conn {
+	return &Conn{
+		conn:     wsconn,
+		hostId:   hostId,
+		sessions: make(map[SessionID]*Session),
+		config:   config,
+	}
 }
 
 type readMsgItem struct {
-	sessionId string
+	sessionId SessionID
 	remoteId  string
 	msgType   int
 	msg       []byte
@@ -91,6 +103,7 @@ func (c *Conn) readRecord() error {
 	return c.readRecordOrCCS(false)
 }
 
+// 关于 CCS 的读写归属是不同的，比较特殊的，读归conn，写归session
 func (c *Conn) readChangeCipherSpec() error {
 	return c.readRecordOrCCS(true)
 }
@@ -144,9 +157,14 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	// 如果是 Application Data 消息，且没有加密算法
 	// 则发送 alertUnexpectedMessage 警告
 	// Application Data messages are always protected.
-	if session.in.cipher == nil && typ == recordTypeApplicationData {
-		return session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
-	}
+
+	// 因为现在是允许跑空一条应用数据的，所以不能有这个检查！【todo：换成别的检查】
+	//【session中增加一个字段，初始化为false，握手函数中会被置为true，
+	// 也就是说这里如果是刚初始化的session，那么这个字段就是false，
+	// 那么就说明是第一次通信，那么就允许跑空一条应用数据】
+	// if session.in.cipher == nil && typ == recordTypeApplicationData {
+	// 	return session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+	// }
 
 	// 处理不同类型的TLS记录
 	switch typ {
@@ -198,9 +216,12 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 
 func (c *Conn) WriteMessage(messageType int, message []byte) error {
 
-	// 似乎这里必须要写一段拆包逻辑来获取 receiveId
+	// 似乎这里必须要写一段拆包逻辑来获取 receiveId 或者说 remoteId
 	// 和服务端的拆包逻辑相同，和模拟客户端的打包逻辑相反
-	remoteId := string(message[1:11])
+	remoteId, err := parseReceivedMsg(message, c.config.compressor(), c.config.encoder())
+	if err != nil {
+		return err
+	}
 	sessionId := getSessionID(c.hostId, remoteId)
 
 	session := c.sessions[sessionId]
@@ -216,7 +237,7 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 
 	// 三种数据类型：应用、握手、CCS，这里肯定是应用来的
 
-	err := c.writeRecordLocked(recordTypeApplicationData, message, session)
+	err = c.writeRecordLocked(recordTypeApplicationData, message, session)
 	if err != nil {
 		return err
 	}
@@ -313,52 +334,42 @@ func (c *Conn) IsNil() bool {
 }
 
 // 返回发送者的id和消息内容未解密的 rawContentData 列表，虽然是列表但是就一个数据一般
-// func parseReceivedMsg(msg []byte, compressor compressor.Compressor, encoder encoder.Encoder) (string, [][]byte, error) {
+func parseReceivedMsg(msg []byte, compressor compressor.Compressor, encoder encoder.Encoder) (string, error) {
 
-// 	// 解压
-// 	decompressMsg, err := compressor.DecompressWithPool(msg)
-// 	if err != nil {
-// 		log.Printf("解压消息失败: %v", err)
-// 		return "", nil, err
-// 	}
-
-// 	// 解码
-// 	var resp Resp
-// 	err = encoder.Decode(decompressMsg, &resp)
-// 	if err != nil {
-// 		log.Printf("解码消息失败: %v", err)
-// 		return "", nil, err
-// 	}
-
-// 	var pushMsg sdkws.PushMessages
-// 	// 反序列化到 PushMessages 结构体
-// 	err = proto.Unmarshal(resp.Data, &pushMsg)
-// 	if err != nil {
-// 		log.Printf("反序列化消息失败: %v", err)
-// 		return "", nil, err
-// 	}
-
-// 	senderIds := make([]string, 0, 1)
-// 	// var senderIds string
-// 	rawContentList := make([][]byte, 0, 1)
-
-// 	msgMap := pushMsg.Msgs
-// 	// 虽然是循环，但是单聊的时候 map 里只会有一个会话
-// 	for _, pullMsg := range msgMap {
-// 		// 一个会话里可能有多个消息，但单聊的时候一般只有一个
-// 		for _, msgData := range pullMsg.Msgs {
-
-// 			// log.Printf("From会话[%s]收到消息: %s", conversationId, recvMsg.Content)
-// 			senderIds = append(senderIds, msgData.SendID)
-// 			rawContentList = append(rawContentList, msgData.Content)
-// 		}
-// 	}
-// 	return senderIds[0], rawContentList, nil
-// }
-
-func getSessionID(A, B string) string {
-	if A < B {
-		return A + "_" + B
+	// 解压
+	decompressMsg, err := compressor.DecompressWithPool(msg)
+	if err != nil {
+		log.Printf("解压消息失败: %v", err)
+		return "", err
 	}
-	return B + "_" + A
+
+	// 解码
+	var req Req
+	err = encoder.Decode(decompressMsg, &req)
+	if err != nil {
+		log.Printf("解码消息失败: %v", err)
+		return "", err
+	}
+
+	var msgData sdkws.MsgData
+	if err := proto.Unmarshal(req.Data, &msgData); err != nil {
+		return "", err
+	}
+
+	// var pushMsg sdkws.PushMessages
+	// // 反序列化到 PushMessages 结构体
+	// err = proto.Unmarshal(req.Data, &pushMsg)
+	// if err != nil {
+	// 	log.Printf("反序列化消息失败: %v", err)
+	// 	return "", nil, err
+	// }
+
+	return msgData.RecvID, nil
+}
+
+func getSessionID(A, B string) SessionID {
+	if A < B {
+		return SessionID(A + "_" + B)
+	}
+	return SessionID(B + "_" + A)
 }

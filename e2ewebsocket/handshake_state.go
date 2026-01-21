@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"path/filepath"
+
+	ccrypto "github.com/albert/ws_client/crypto"
 )
 
 // type clientHandshakeState struct {
@@ -39,7 +42,8 @@ import (
 // }
 
 type handshakeState struct {
-	c *Conn
+	// c *Conn
+	s *Session
 
 	localId  string
 	remoteId string
@@ -52,54 +56,58 @@ type handshakeState struct {
 	masterSecret    []byte
 }
 
-func (c *Conn) symHandshake(ctx context.Context) (err error) {
+// 原先的三个来在 conn 的过渡方法现在要归属于 session 了
+func (s *Session) symHandshake(ctx context.Context) (err error) {
 
-	if c.config == nil {
-		c.config = defaultConfig()
+	if s.conn.config == nil {
+		s.conn.config = defaultConfig()
 	}
 
 	// 【第一大步：生成本地 Hello 消息】
-	hello, err := c.makeHello()
+	hello, err := s.makeHello()
 	if err != nil {
 		return err
 	}
 
 	// 【第二大步：发送本地 Hello 消息】
-	if _, err := c.writeHandshakeRecord(hello, nil); err != nil {
+	if err := s.writeHandshakeRecord(hello, nil); err != nil {
 		return err
 	}
 
 	// 【第三大步：接收对端 Hello 消息】
-	msg, err := c.readHandshake(nil)
+	msg, err := s.readHandshake(nil)
 	if err != nil {
 		return err
 	}
 
 	remoteHello, ok := msg.(*helloMsg)
 	if !ok {
-		c.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		s.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
 		return errors.New("unexpectedMessageError")
 	}
 
 	// 选出来的版本直接记到 Conn 里面了
-	if err := c.pickE2EVersion(remoteHello); err != nil {
+	if err := s.pickE2EVersion(remoteHello); err != nil {
 		return err
 	}
 
 	// 后续如果改到 Session 下，相当于每个握手 Session 都有自己独立的 handshakeState
 	hs := &handshakeState{
-		c:              c,
+		s:              s,
 		helloMsg:       hello,
 		remoteHelloMsg: remoteHello,
+
+		localId:  s.conn.hostId,
+		remoteId: s.remoteId,
 	}
 	// 把自己构建发送的 hello 消息和接收的对端 hello 消息都挂在了 hs 上
 	// 供后续 handshake 时 processHello 使用
 	return hs.handshake()
 }
 
-func (c *Conn) makeHello() (*helloMsg, error) {
+func (s *Session) makeHello() (*helloMsg, error) {
 
-	config := c.config
+	config := s.conn.config
 
 	version := config.Version
 	// 可通过 config 设置，没设置走默认
@@ -129,8 +137,8 @@ func (c *Conn) makeHello() (*helloMsg, error) {
 	}
 
 	// 重协商需包含之前的 finished 消息一起计算
-	if c.handshakes > 0 {
-		hello.secureRenegotiation = c.localFinished[:]
+	if s.handshakes > 0 {
+		hello.secureRenegotiation = s.localFinished[:]
 	}
 
 	// 基于硬件条件设置prefer order xx
@@ -165,22 +173,22 @@ func (c *Conn) makeHello() (*helloMsg, error) {
 	return hello, nil
 }
 
-func (c *Conn) pickE2EVersion(remoteHello *helloMsg) error {
-	vers, ok := c.config.mutualVersion(remoteHello.supportedVersions)
+func (s *Session) pickE2EVersion(remoteHello *helloMsg) error {
+	vers, ok := s.conn.config.mutualVersion(remoteHello.supportedVersions)
 	if !ok {
-		c.out.setErrorLocked(errors.New("alertProtocolVersion"))
-		return fmt.Errorf("tls: server selected unsupported protocol version")
+		s.out.setErrorLocked(errors.New("alertProtocolVersion"))
+		return fmt.Errorf("server selected unsupported protocol version")
 	}
 
-	c.vers = vers
-	c.in.version = vers
-	c.out.version = vers
+	s.vers = vers
+	s.in.version = vers
+	s.out.version = vers
 
 	return nil
 }
 
 func (hs *handshakeState) handshake() error {
-	c := hs.c
+	s := hs.s
 
 	err := hs.processHello()
 	if err != nil {
@@ -202,7 +210,7 @@ func (hs *handshakeState) handshake() error {
 	if err := hs.establishKeys(); err != nil {
 		return err
 	}
-	if err := hs.sendFinished(c.localFinished[:]); err != nil {
+	if err := hs.sendFinished(s.localFinished[:]); err != nil {
 		return err
 	}
 
@@ -215,17 +223,17 @@ func (hs *handshakeState) handshake() error {
 	// 	return err
 	// }
 
-	if err := hs.readFinished(c.remoteFinished[:]); err != nil {
+	if err := hs.readFinished(s.remoteFinished[:]); err != nil {
 		return err
 	}
 
-	c.isHandshakeComplete.Store(true)
+	s.isHandshakeComplete.Store(true)
 
 	return nil
 }
 
 func (hs *handshakeState) processHello() error {
-	c := hs.c
+	s := hs.s
 
 	if err := hs.pickCipherSuite(); err != nil {
 		return err
@@ -235,19 +243,19 @@ func (hs *handshakeState) processHello() error {
 		return err
 	}
 
-	if c.handshakes == 0 && hs.remoteHelloMsg.secureRenegotiationSupported {
-		c.secureRenegotiation = true
+	if s.handshakes == 0 && hs.remoteHelloMsg.secureRenegotiationSupported {
+		s.secureRenegotiation = true
 		if len(hs.remoteHelloMsg.secureRenegotiation) != 0 {
-			return c.out.setErrorLocked(errors.New("tls: initial handshake had non-empty renegotiation extension"))
+			return s.out.setErrorLocked(errors.New("tls: initial handshake had non-empty renegotiation extension"))
 		}
 	}
 
-	if c.handshakes > 0 && c.secureRenegotiation {
+	if s.handshakes > 0 && s.secureRenegotiation {
 		var expectedSecureRenegotiation [24]byte
-		copy(expectedSecureRenegotiation[:], c.localFinished[:])
-		copy(expectedSecureRenegotiation[12:], c.remoteFinished[:])
+		copy(expectedSecureRenegotiation[:], s.localFinished[:])
+		copy(expectedSecureRenegotiation[12:], s.remoteFinished[:])
 		if !bytes.Equal(hs.remoteHelloMsg.secureRenegotiation, expectedSecureRenegotiation[:]) {
-			return c.out.setErrorLocked(errors.New("tls: incorrect renegotiation extension contents"))
+			return s.out.setErrorLocked(errors.New("tls: incorrect renegotiation extension contents"))
 		}
 	}
 
@@ -258,21 +266,21 @@ func (hs *handshakeState) pickCipherSuite() error {
 	// 设置到 handshakeState 的 suite 和
 	// Conn 的 cipherSuite 上
 	if hs.suite = mutualCipherSuite(hs.helloMsg.cipherSuites, hs.remoteHelloMsg.cipherSuites); hs.suite == nil {
-		return hs.c.out.setErrorLocked(errors.New("tls: server chose an unconfigured cipher suite"))
+		return hs.s.out.setErrorLocked(errors.New("tls: server chose an unconfigured cipher suite"))
 	}
 	// todo: 如果是国密这里suite的ka要特殊构造(也不一定要在这里)
 	// if sm2ka, ok := hs.suite.ka.(*sm2KeyAgreement); ok {
 	// 	sm2ka.localId = hs.localId
 	// 	sm2ka.remoteId = hs.remoteId
 	// }
-	hs.c.cipherSuite = hs.suite.id
+	hs.s.cipherSuite = hs.suite.id
 	return nil
 }
 
 func (hs *handshakeState) pickSignatureScheme() error {
 
 	if hs.signatureScheme = mutualSignatureScheme(hs.helloMsg.supportedSignatureAlgorithms, hs.remoteHelloMsg.supportedSignatureAlgorithms); hs.signatureScheme == 0 {
-		return hs.c.out.setErrorLocked(errors.New("tls: server chose an unconfigured signature scheme"))
+		return hs.s.out.setErrorLocked(errors.New("tls: server chose an unconfigured signature scheme"))
 	}
 	return nil
 }
@@ -280,7 +288,7 @@ func (hs *handshakeState) pickSignatureScheme() error {
 func (hs *handshakeState) doFullHandshake() error {
 	// 要保证的是 hs 上的逻辑是统一的
 	// 但是内部 ka 上的逻辑是不用统一的
-	c := hs.c
+	s := hs.s
 
 	keyAgreement := hs.suite.ka
 
@@ -291,44 +299,51 @@ func (hs *handshakeState) doFullHandshake() error {
 		sm2ka.remoteId = hs.remoteId
 		// 现在才加载静态公钥，还是初始化的时候就加载到hs里面，然后现在从hs拿可以考虑一下
 		// 路径应该从哪里获取，全局变量还是config中？
-		sm2ka.localStaticPrivateKey = ccrypto.LoadPrivateKeyFileFromPEM(hs.c.config.staticPrivateKeyFile)
-		sm2ka.remoteStaticPublicKey = ccrypto.LoadPublicKeyFileFromPEM(hs.c.config.staticPublicKeyFile)
-
+		localPrivateKey, err := ccrypto.LoadPrivateKeyFileFromPEM(filepath.Join(s.conn.config.keyStorePath(), hs.localId, "private_key.pem"))
+		sm2ka.localStaticPrivateKey = localPrivateKey
+		if err != nil {
+			return err
+		}
+		remotePublicKey, err := ccrypto.LoadPublicKeyFileFromPEM(filepath.Join(s.conn.config.keyStorePath(), hs.remoteId, "public_key.pem"))
+		sm2ka.remoteStaticPublicKey = remotePublicKey
+		if err != nil {
+			return err
+		}
 	}
 	// 先发自己的 keyExchangeMsg
-	localKxm, err := keyAgreement.generateLocalKeyExchange(c.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg)
+	localKxm, err := keyAgreement.generateLocalKeyExchange(s.conn.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg)
 	if err != nil {
-		c.out.setErrorLocked(errors.New("alertInternalError"))
+		s.out.setErrorLocked(errors.New("alertInternalError"))
 		return err
 	}
 	if localKxm != nil {
-		if _, err := hs.c.writeHandshakeRecord(localKxm, &hs.finishedHash); err != nil {
+		if err := s.writeHandshakeRecord(localKxm, &hs.finishedHash); err != nil {
 			return err
 		}
 	}
 
 	// 在收对方的 keyExchangeMsg
-	msg, err := c.readHandshake(&hs.finishedHash)
+	msg, err := s.readHandshake(&hs.finishedHash)
 	if err != nil {
 		return err
 	}
 	remoteKxm, ok := msg.(*keyExchangeMsg)
 	var preMasterSecret []byte
 	if ok {
-		preMasterSecret, err = keyAgreement.processRemoteKeyExchange(c.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg, remoteKxm)
+		preMasterSecret, err = keyAgreement.processRemoteKeyExchange(s.conn.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg, remoteKxm)
 		if err != nil {
-			c.out.setErrorLocked(errors.New("alertIllegalParameter"))
+			s.out.setErrorLocked(errors.New("alertIllegalParameter"))
 			return err
 		}
 		// 获取曲线并记录
 		if len(remoteKxm.key) >= 3 && remoteKxm.key[0] == 3 /* named curve */ {
-			c.curveID = CurveID(BEUint16(remoteKxm.key[1:]))
+			s.curveID = CurveID(BEUint16(remoteKxm.key[1:]))
 		}
 
 	}
 
 	// sm2 的 initiator 逻辑影响到了外面，hs得有状态记录
-	hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random)
+	hs.masterSecret = masterFromPreMasterSecret(s.vers, hs.suite, preMasterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random)
 
 	// hs.finishedHash.discardHandshakeBuffer()
 
@@ -336,12 +351,12 @@ func (hs *handshakeState) doFullHandshake() error {
 }
 
 func (hs *handshakeState) establishKeys() error {
-	c := hs.c
-	// 到这里你就发现sm2印象的不是只ka内部的逻辑了
+	s := hs.s
+	// 到这里你就发现sm2影响的不是只ka内部的逻辑了
 	// 甚至是影响到了外面，这里关于keys的生成
 
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
-		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
+		keysFromMasterSecret(s.vers, hs.suite, hs.masterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
 	var clientCipher, serverCipher any
 	var clientHash, serverHash hash.Hash
 	if hs.suite.cipher != nil {
@@ -354,21 +369,21 @@ func (hs *handshakeState) establishKeys() error {
 		serverCipher = hs.suite.aead(serverKey, serverIV)
 	}
 
-	c.in.prepareCipherSpec(c.vers, serverCipher, serverHash)
-	c.out.prepareCipherSpec(c.vers, clientCipher, clientHash)
+	s.in.prepareCipherSpec(s.vers, serverCipher, serverHash)
+	s.out.prepareCipherSpec(s.vers, clientCipher, clientHash)
 	return nil
 }
 
 func (hs *handshakeState) sendFinished(out []byte) error {
-	c := hs.c
+	s := hs.s
 
-	if err := c.writeChangeCipherRecord(); err != nil {
+	if err := s.writeChangeCipherRecord(); err != nil {
 		return err
 	}
 
 	finished := new(finishedMsg)
 	finished.verifyData = hs.finishedHash.localSum(hs.masterSecret)
-	if _, err := hs.c.writeHandshakeRecord(finished, &hs.finishedHash); err != nil {
+	if err := s.writeHandshakeRecord(finished, &hs.finishedHash); err != nil {
 		return err
 	}
 	copy(out, finished.verifyData)
@@ -376,28 +391,28 @@ func (hs *handshakeState) sendFinished(out []byte) error {
 }
 
 func (hs *handshakeState) readFinished(out []byte) error {
-	c := hs.c
+	s := hs.s
 
-	if err := c.readChangeCipherSpec(); err != nil {
+	if err := s.conn.readChangeCipherSpec(); err != nil {
 		return err
 	}
 
 	// finishedMsg is included in the transcript, but not until after we
 	// check the client version, since the state before this message was
 	// sent is used during verification.
-	msg, err := c.readHandshake(nil)
+	msg, err := s.readHandshake(nil)
 	if err != nil {
 		return err
 	}
 	serverFinished, ok := msg.(*finishedMsg)
 	if !ok {
-		return c.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		return s.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
 	}
 
 	verify := hs.finishedHash.remoteSum(hs.masterSecret)
 	if len(verify) != len(serverFinished.verifyData) ||
 		subtle.ConstantTimeCompare(verify, serverFinished.verifyData) != 1 {
-		return c.out.setErrorLocked(errors.New("alertHandshakeFailure"))
+		return s.out.setErrorLocked(errors.New("alertHandshakeFailure"))
 	}
 
 	if err := transcriptMsg(serverFinished, &hs.finishedHash); err != nil {

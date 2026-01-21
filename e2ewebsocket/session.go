@@ -14,10 +14,13 @@ import (
 	ccrypto "github.com/albert/ws_client/crypto"
 )
 
+type SessionID string
+
+
 // Session: 负责单个逻辑会话的协商和加密
 type Session struct {
 	// 初始化时要填入的参数
-	id       string
+	id       SessionID
 	remoteId string //【似乎可以不要】 因为 ws 里面记录了 hostId，所以 session 中记录对方的 id，避免出现需要从 id 里提取两个 id 的情况
 	conn     *Conn
 
@@ -39,12 +42,14 @@ type Session struct {
 	hand [][]byte
 }
 
-func NewSession(id string, remoteId string, conn *Conn) *Session {
-	return &Session{
+func NewSession(id SessionID, remoteId string, conn *Conn) *Session {
+	s := Session{
 		id:       id,
 		remoteId: remoteId,
 		conn:     conn,
 	}
+	s.handshakeFn = s.symHandshake
+	return &s
 }
 
 func (s *Session) Handshake() error {
@@ -144,8 +149,7 @@ func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 	return s.handshakeErr
 }
 
-// 读两个
-
+// 读取握手数据方法在 session 上，读应用数据方法在 conn 上，源泵方法在 conn 上
 func (s *Session) readHandshake(transcript transcriptHash) (any, error) {
 
 	// 合理应该弄一个最高上限次数，或者说超时时间，不能一致循环在这里
@@ -198,7 +202,7 @@ func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHa
 	return m, nil
 }
 
-// 写两个个
+// 同理写握手数据、写CCS数据方法在 session 上，写应用数据方法在 session 上
 func (s *Session) writeHandshakeRecord(msg handshakeMessage, transcript transcriptHash) error {
 	// c.out.Lock()
 	// defer c.out.Unlock()
