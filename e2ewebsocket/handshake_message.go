@@ -95,9 +95,11 @@ func (m *helloMsg) unmarshal(data []byte) bool {
 	// 跳过 1消息类型(1字节)和长度(3字节)
 	// 读取 2代表版号(2字节)
 	// 读取 3随机数(32字节)
-	if !s.Skip(4) || !s.ReadUint16(&m.supportedVersions[0]) || !s.ReadBytes(&m.random, 32) {
+	var version uint16
+	if !s.Skip(4) || !s.ReadUint16(&version) || !s.ReadBytes(&m.random, 32) {
 		return false
 	}
+	m.supportedVersions = append(m.supportedVersions, version)
 
 	// 读取 4密码套件(2字节长度和n个2字节套件列表)
 	var cipherSuites cryptobyte.String

@@ -32,38 +32,45 @@ import (
 // }
 
 type sm4AEADCipher struct {
-	enc *sm4Encrypter
-	dec *sm4Decrypter
+	key       []byte
+	fixedNonce []byte // 固定的 nonce 前缀（如果有的话）
 }
 
-func NewSm4AEADCipher(key, iv []byte) cipher.AEAD {
-	enc, err := NewEncrypter(crypto.CipherModeGCM, key, iv)
-	if err != nil {
-		fmt.Printf("sm4AEADCipher NewSm4AEADCipher error [NewEncrypter]: %v", err)
-		return nil
+func NewSm4AEADCipher(key, fixedNonce []byte) cipher.AEAD {
+	// 保存 key 和固定 nonce，每次 Seal/Open 时会使用传入的完整 nonce
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
+
+	var nonceCopy []byte
+	if len(fixedNonce) > 0 {
+		nonceCopy = make([]byte, len(fixedNonce))
+		copy(nonceCopy, fixedNonce)
 	}
-	dec, err := NewDecrypter(crypto.CipherModeGCM, key, iv)
-	if err != nil {
-		fmt.Printf("sm4AEADCipher NewSm4AEADCipher error [NewDecrypter]: %v", err)
-		return nil
-	}
+
 	return &sm4AEADCipher{
-		enc: enc,
-		dec: dec,
+		key:       keyCopy,
+		fixedNonce: nonceCopy,
 	}
 }
 
 func (c *sm4AEADCipher) Seal(dst, nonce, plaintext, aad []byte) []byte {
+	// 每次加密都使用传入的 nonce 创建新的加密器，确保 nonce 唯一性
+	enc, err := NewEncrypter(crypto.CipherModeGCM, c.key, nonce)
+	if err != nil {
+		fmt.Printf("sm4AEADCipher Seal error [NewEncrypter]: %v", err)
+		return nil
+	}
+
 	// 设置 AAD
-	c.enc.SetAAD(aad)
+	enc.SetAAD(aad)
 	// 加密
-	ciphertext, err := c.enc.EncryptAll(plaintext)
+	ciphertext, err := enc.EncryptAll(plaintext)
 	if err != nil {
 		fmt.Printf("sm4AEADCipher Seal error [EncryptAll]: %v", err)
 		return nil
 	}
 	// 获取 tag
-	tag, err := c.enc.GetTag()
+	tag, err := enc.GetTag()
 	if err != nil {
 		fmt.Printf("sm4AEADCipher Seal error [GetTag]: %v", err)
 		return nil
@@ -75,15 +82,22 @@ func (c *sm4AEADCipher) Seal(dst, nonce, plaintext, aad []byte) []byte {
 }
 
 func (c *sm4AEADCipher) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error) {
+	// 每次解密都使用传入的 nonce 创建新的解密器
+	dec, err := NewDecrypter(crypto.CipherModeGCM, c.key, nonce)
+	if err != nil {
+		fmt.Printf("sm4AEADCipher Open error [NewDecrypter]: %v", err)
+		return nil, err
+	}
+
 	// 设置 AAD
-	c.dec.SetAAD(aad)
+	dec.SetAAD(aad)
 	tag := ciphertext[len(ciphertext)-c.Overhead():]
 
 	// 设置 tag
-	c.dec.SetTag(tag)
+	dec.SetTag(tag)
 
 	// 解密
-	plaintext, err := c.dec.DecryptAll(ciphertext[:len(ciphertext)-c.Overhead()])
+	plaintext, err := dec.DecryptAll(ciphertext[:len(ciphertext)-c.Overhead()])
 	if err != nil {
 		fmt.Printf("sm4AEADCipher Open error [DecryptAll]: %v", err)
 		return nil, err

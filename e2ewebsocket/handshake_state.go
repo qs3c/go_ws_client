@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	ccrypto "github.com/albert/ws_client/crypto"
+	"github.com/albert/ws_client/crypto/sm2keyexch"
 )
 
 // type clientHandshakeState struct {
@@ -290,23 +291,39 @@ func (hs *handshakeState) doFullHandshake() error {
 	// 但是内部 ka 上的逻辑是不用统一的
 	s := hs.s
 
-	keyAgreement := hs.suite.ka
+	// 使用工厂函数创建新的 keyAgreement 实例，避免并发问题
+	keyAgreement := hs.suite.kaFactory()
 
-	// 不在 pick 密钥套件那边构造，在这里完善sm2ka
-	// 而采用这种补充的方法，之前的那个New方法其实就用处不大了
-	if sm2ka, ok := hs.suite.ka.(*sm2KeyAgreement); ok {
+	// 初始化 sm2KeyAgreement 的参数
+	if sm2ka, ok := keyAgreement.(*sm2KeyAgreement); ok {
 		sm2ka.localId = hs.localId
 		sm2ka.remoteId = hs.remoteId
-		// 现在才加载静态公钥，还是初始化的时候就加载到hs里面，然后现在从hs拿可以考虑一下
-		// 路径应该从哪里获取，全局变量还是config中？
+
+		// 加载本地私钥（先检查错误再赋值）
 		localPrivateKey, err := ccrypto.LoadPrivateKeyFileFromPEM(filepath.Join(s.conn.config.keyStorePath(), hs.localId, "private_key.pem"))
-		sm2ka.localStaticPrivateKey = localPrivateKey
 		if err != nil {
 			return err
 		}
+		sm2ka.localStaticPrivateKey = localPrivateKey
+
+		// 加载对端公钥（先检查错误再赋值）
 		remotePublicKey, err := ccrypto.LoadPublicKeyFileFromPEM(filepath.Join(s.conn.config.keyStorePath(), hs.remoteId, "public_key.pem"))
-		sm2ka.remoteStaticPublicKey = remotePublicKey
 		if err != nil {
+			return err
+		}
+		sm2ka.remoteStaticPublicKey = remotePublicKey
+
+		// 初始化 SM2 密钥协商上下文
+		localECKey, err := ccrypto.ToECKey(localPrivateKey)
+		if err != nil {
+			return err
+		}
+		remoteECKey, err := ccrypto.ToECKey(remotePublicKey)
+		if err != nil {
+			return err
+		}
+		sm2ka.ctxLocal = sm2keyexch.NewKAPCtx()
+		if err := sm2ka.ctxLocal.Init(localECKey, hs.localId, remoteECKey, hs.remoteId, hs.localId > hs.remoteId, true); err != nil {
 			return err
 		}
 	}

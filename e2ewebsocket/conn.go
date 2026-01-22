@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/albert/ws_client/compressor"
@@ -19,7 +20,8 @@ type Conn struct {
 	hostId string
 	config *Config
 
-	sessions map[SessionID]*Session
+	sessionsMu sync.RWMutex
+	sessions   map[SessionID]*Session
 
 	// 握手状态相关
 	// vers                uint16
@@ -86,7 +88,9 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 	}
 
 	// 是二进制应用消息，那么就拿出对应的session，可能存在第一次通信的情况，session并不存在
+	c.sessionsMu.RLock()
 	session := c.sessions[item.sessionId]
+	c.sessionsMu.RUnlock()
 	if session == nil {
 		// 到这里的时候 session 不可能为 nil 了
 		// 如果是 nil 那么是有问题的
@@ -135,12 +139,14 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 
 	// 构造sessionId 并获取到对应的session
 	sessionId := getSessionID(c.hostId, senderId)
+	c.sessionsMu.Lock()
 	session := c.sessions[sessionId]
 	if session == nil {
 		// session 创建逻辑应该在这里
 		session = NewSession(sessionId, senderId, c)
 		c.sessions[sessionId] = session
 	}
+	c.sessionsMu.Unlock()
 	// 握手状态相关的校验，全部后置
 	if session.in.err != nil {
 		return session.in.err
@@ -224,12 +230,14 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 	}
 	sessionId := getSessionID(c.hostId, remoteId)
 
+	c.sessionsMu.Lock()
 	session := c.sessions[sessionId]
 	if session == nil {
 		// 初始化session
 		session = NewSession(sessionId, remoteId, c)
 		c.sessions[sessionId] = session
 	}
+	c.sessionsMu.Unlock()
 	// 看起来在 write 这边握手操作是可以前置的，因为他在写操作之前就可以知道是要给谁发
 	// 从而获取到对应 session，但是这样的话和某个用户之间的首次通信就会是一个握手数据，而不是应用数据【没有漏一条应用数据进行握手触发的效果】
 	// 就会和 read 那边的逻辑对不上，所以还是需要漏一个应用数据的

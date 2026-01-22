@@ -89,23 +89,42 @@ const (
 )
 
 var cipherSuitesPreferenceOrder = []uint16{
-	// 国密
+	// 国密 GCM 模式（推荐）
 	E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3,
 	E2E_SM2KEYAGREEMENT_WITH_SM4_256_GCM_SM3,
 	E2E_SM2KEYAGREEMENT_WITH_SM4_512_GCM_SM3,
-	E2E_SM2KEYAGREEMENT_WITH_SM4_128_CBC_SM3,
-	E2E_SM2KEYAGREEMENT_WITH_SM4_256_CBC_SM3,
-	E2E_SM2KEYAGREEMENT_WITH_SM4_512_CBC_SM3,
 
 	// 混合后量子
 	E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3,
 	E2E_MLKEMSM2_WITH_SM4_256_GCM_SM3,
 	E2E_MLKEMSM2_WITH_SM4_512_GCM_SM3,
+
+	// CBC 模式（尚未实现，暂不包含在偏好列表中）
+	// E2E_SM2KEYAGREEMENT_WITH_SM4_128_CBC_SM3,
+	// E2E_SM2KEYAGREEMENT_WITH_SM4_256_CBC_SM3,
+	// E2E_SM2KEYAGREEMENT_WITH_SM4_512_CBC_SM3,
 }
 
-// 目前密码套件仅一种实现
+// sm2KAFactory 创建新的 sm2KeyAgreement 实例，避免并发问题
+func sm2KAFactory() keyAgreement {
+	return &sm2KeyAgreement{}
+}
+
+// 密码套件映射表
+// SM4 密钥长度固定为 16 字节，套件名中的 128/256/512 表示派生密钥材料的长度
 var cipherSuites = map[uint16]*cipherSuite{
-	E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3: {E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3, 16, 0, 4, sm2KA, suiteTLS12, nil, nil, sm4tongsuo.NewSm4AEADCipher},
+	// 国密 SM2 密钥交换 + SM4-GCM + SM3
+	E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3: {E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3, 16, 0, 4, sm2KAFactory, suiteTLS12 | suiteSM3, nil, nil, sm4tongsuo.NewSm4AEADCipher},
+	E2E_SM2KEYAGREEMENT_WITH_SM4_256_GCM_SM3: {E2E_SM2KEYAGREEMENT_WITH_SM4_256_GCM_SM3, 16, 0, 4, sm2KAFactory, suiteTLS12 | suiteSM3, nil, nil, sm4tongsuo.NewSm4AEADCipher},
+	E2E_SM2KEYAGREEMENT_WITH_SM4_512_GCM_SM3: {E2E_SM2KEYAGREEMENT_WITH_SM4_512_GCM_SM3, 16, 0, 4, sm2KAFactory, suiteTLS12 | suiteSM3, nil, nil, sm4tongsuo.NewSm4AEADCipher},
+	// 国密 SM2 密钥交换 + SM4-CBC + SM3（CBC 模式尚未完全实现，暂时注释）
+	// E2E_SM2KEYAGREEMENT_WITH_SM4_128_CBC_SM3: {E2E_SM2KEYAGREEMENT_WITH_SM4_128_CBC_SM3, 16, 32, 16, sm2KAFactory, suiteTLS12 | suiteSM3, nil, nil, nil},
+	// E2E_SM2KEYAGREEMENT_WITH_SM4_256_CBC_SM3: {E2E_SM2KEYAGREEMENT_WITH_SM4_256_CBC_SM3, 16, 32, 16, sm2KAFactory, suiteTLS12 | suiteSM3, nil, nil, nil},
+	// E2E_SM2KEYAGREEMENT_WITH_SM4_512_CBC_SM3: {E2E_SM2KEYAGREEMENT_WITH_SM4_512_CBC_SM3, 16, 32, 16, sm2KAFactory, suiteTLS12 | suiteSM3, nil, nil, nil},
+	// 后量子混合加密 MLKEM+SM2 + SM4-GCM + SM3
+	E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3: {E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3, 16, 0, 4, sm2KAFactory, suiteTLS12 | suiteSM3, nil, nil, sm4tongsuo.NewSm4AEADCipher},
+	E2E_MLKEMSM2_WITH_SM4_256_GCM_SM3: {E2E_MLKEMSM2_WITH_SM4_256_GCM_SM3, 16, 0, 4, sm2KAFactory, suiteTLS12 | suiteSM3, nil, nil, sm4tongsuo.NewSm4AEADCipher},
+	E2E_MLKEMSM2_WITH_SM4_512_GCM_SM3: {E2E_MLKEMSM2_WITH_SM4_512_GCM_SM3, 16, 0, 4, sm2KAFactory, suiteTLS12 | suiteSM3, nil, nil, sm4tongsuo.NewSm4AEADCipher},
 }
 
 type cipherSuite struct {
@@ -114,8 +133,8 @@ type cipherSuite struct {
 	keyLen int
 	macLen int
 	ivLen  int
-	// ka     func(version uint16) keyAgreement
-	ka keyAgreement
+	// kaFactory 用于创建新的 keyAgreement 实例，避免并发问题
+	kaFactory func() keyAgreement
 	// flags is a bitmask of the suite* values, above.
 	flags  int
 	cipher func(key, iv []byte, isRead bool) any
@@ -205,14 +224,5 @@ func cipherSuiteByID(id uint16) *cipherSuite {
 	return suite
 }
 
-var sm2KA = &sm2KeyAgreement{}
-
-// func sm2KA(version uint16) keyAgreement {
-// 	return &sm2KeyAgreement{}
-// }
-
-// ok已经知道了，ciphersuite中的ka就是一个keyAgreement实例，并不是ka的id什么的
-// 不像 cipher+mac 或者 aead，他们是在 cipher 中不是实例，而是根据入参（密钥,随机值之类的）返回对应实例的函数
-// 所以我在协商pickciphersuite套件的时候，就要把ka初始化好
-// 冲突，但是pickciphersuite的时候，其实是从已经提前预备好的 ciphersuites 列表里面去找
-// 而 sm2 的特点是无法提前预备好！因为不知道id信息，预备半好试试
+// 现在使用 kaFactory 工厂函数为每个会话创建新的 keyAgreement 实例
+// 这样可以避免多会话共享同一个 ka 实例导致的并发问题

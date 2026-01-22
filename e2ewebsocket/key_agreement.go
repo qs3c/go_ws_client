@@ -6,7 +6,6 @@ import (
 	"errors"
 
 	ccrypto "github.com/albert/ws_client/crypto"
-	"github.com/albert/ws_client/crypto/ecdh_curve"
 	"github.com/albert/ws_client/crypto/sm2keyexch"
 	"github.com/albert/ws_client/crypto/sm2tongsuo"
 	"github.com/albert/ws_client/crypto/sm3tongsuo"
@@ -130,64 +129,31 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 		return nil, errors.New("remote used unsupported curve")
 	}
 
-	// 在这里基于ka新建curve
-	// 谁 id 大谁是 initiator
-	sm2Curve := ecdh_curve.NewSm2P256V1(ka.localId > ka.remoteId)
-
-	// publicKey 是 RB
+	// publicKey 是 RB（对端的临时公钥）
 	publicLen := int(kxm.key[3])
 	if publicLen+4 > len(kxm.key) {
 		return nil, errKeyExchange
 	}
 	remoteECDHEParams := kxm.key[:4+publicLen]
-	publicKey := remoteECDHEParams[4:]
+	RB := remoteECDHEParams[4:] // 对端临时公钥 RB
 
 	sig := kxm.key[4+publicLen:]
 	if len(sig) < 2 {
 		return nil, errKeyExchange
 	}
 
-	// 到这里，双方id以及静态的公私钥其实都是有的，但是从哪传进来?
-	// 比如生成 sm2 的 KA 的时候，所以会出现和不同的人协商 suite 是一样的，但是 ka 是不同的
-	// 那是不是和不同人，handshakeState也不同？
-
-	// sm2 密钥交换是没有 curve 可以选的
-	// if _, ok := curveForCurveID(curveID); !ok {
-	// 	return errors.New("remote used unsupported curve")
-	// }
-
-	// 产生临时私钥（sm2 似乎不需要这一步，在ecdh内部完成了）
-	// key, err := generateECDHEKey(config.rand(), curveID)
-	// if err != nil {
-	// 	return err
-	// }
-	// ka.key = key
-
-	// 有 RB 了直接发起ecdh即可，但是 curve 的 ecdh 方法要通过临时私钥的 ECDH 来调用
-	// 而 sm2 交换中没有临时私钥
-	// ecdh 有必要做到 curve 上吗，有必要做接口兼容吗
-
-	// 新建一个空privateKey 纯粹是为了调用curve的ecdh绕的远路，因为sm2没有显示的临时私钥，
-	// 所以说有没有必要做兼容，这些都是兼容带来的代价，兼容带来的优势是？
-	key := ecdh_curve.NewEmptySm2PrivateKey(sm2Curve)
-
-	// 把 RB 放到 PublicKey 结构体里面
-	peerKey, err := key.Curve().NewPublicKey(publicKey)
-	if err != nil {
-		return nil, errKeyExchange
+	// 使用已初始化的 ka.ctxLocal 计算共享密钥
+	// ctxLocal 已在 generateLocalKeyExchange 中通过 Prepare() 获取了本地临时公钥 RA
+	// 现在使用对端的 RB 来计算共享密钥
+	if ka.ctxLocal == nil {
+		return nil, errors.New("sm2 key agreement context not initialized")
 	}
 
-	ka.preMasterSecret, err = key.ECDH(peerKey)
+	keyLocal, _, err := ka.ctxLocal.ComputeKey(RB, 32)
 	if err != nil {
-		return nil, errKeyExchange
+		return nil, errors.New("sm2 key agreement failed: " + err.Error())
 	}
-
-	// 把自己的临时公钥做成 clientKeyExchangeMsg【放到下面去！】
-	// ourPublicKey := key.PublicKey().Bytes()
-	// ka.ckx = new(clientKeyExchangeMsg)
-	// ka.ckx.ciphertext = make([]byte, 1+len(ourPublicKey))
-	// ka.ckx.ciphertext[0] = byte(len(ourPublicKey))
-	// copy(ka.ckx.ciphertext[1:], ourPublicKey)
+	ka.preMasterSecret = keyLocal
 
 	// 第二部分：验证签名
 	var sigType uint8
