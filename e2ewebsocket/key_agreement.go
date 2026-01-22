@@ -6,7 +6,6 @@ import (
 	"errors"
 
 	ccrypto "github.com/albert/ws_client/crypto"
-	"github.com/albert/ws_client/crypto/ecdh_curve"
 	"github.com/albert/ws_client/crypto/sm2keyexch"
 	"github.com/albert/ws_client/crypto/sm2tongsuo"
 	"github.com/albert/ws_client/crypto/sm3tongsuo"
@@ -132,7 +131,7 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 
 	// 在这里基于ka新建curve
 	// 谁 id 大谁是 initiator
-	sm2Curve := ecdh_curve.NewSm2P256V1(ka.localId > ka.remoteId)
+	// sm2Curve := ecdh_curve.NewSm2P256V1(ka.localId > ka.remoteId)
 
 	// publicKey 是 RB
 	publicLen := int(kxm.key[3])
@@ -167,20 +166,18 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	// 而 sm2 交换中没有临时私钥
 	// ecdh 有必要做到 curve 上吗，有必要做接口兼容吗
 
-	// 新建一个空privateKey 纯粹是为了调用curve的ecdh绕的远路，因为sm2没有显示的临时私钥，
-	// 所以说有没有必要做兼容，这些都是兼容带来的代价，兼容带来的优势是？
-	key := ecdh_curve.NewEmptySm2PrivateKey(sm2Curve)
+	// ka.preMasterSecret, err = key.ECDH(peerKey)
+	// if err != nil {
+	// 	return nil, errKeyExchange
+	// }
 
-	// 把 RB 放到 PublicKey 结构体里面
-	peerKey, err := key.Curve().NewPublicKey(publicKey)
+	// 使用 ctxLocal 计算共享密钥
+	// 长度暂定 48 (Master Secret Length)
+	sharedKey, _, err := ka.ctxLocal.ComputeKey(publicKey, 48)
 	if err != nil {
 		return nil, errKeyExchange
 	}
-
-	ka.preMasterSecret, err = key.ECDH(peerKey)
-	if err != nil {
-		return nil, errKeyExchange
-	}
+	ka.preMasterSecret = sharedKey
 
 	// 把自己的临时公钥做成 clientKeyExchangeMsg【放到下面去！】
 	// ourPublicKey := key.PublicKey().Bytes()

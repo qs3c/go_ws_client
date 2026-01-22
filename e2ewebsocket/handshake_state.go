@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	ccrypto "github.com/albert/ws_client/crypto"
+	"github.com/albert/ws_client/crypto/sm2keyexch"
 )
 
 // type clientHandshakeState struct {
@@ -294,21 +295,51 @@ func (hs *handshakeState) doFullHandshake() error {
 
 	// 不在 pick 密钥套件那边构造，在这里完善sm2ka
 	// 而采用这种补充的方法，之前的那个New方法其实就用处不大了
+	// Init sm2KA session-specific instance
 	if sm2ka, ok := hs.suite.ka.(*sm2KeyAgreement); ok {
-		sm2ka.localId = hs.localId
-		sm2ka.remoteId = hs.remoteId
-		// 现在才加载静态公钥，还是初始化的时候就加载到hs里面，然后现在从hs拿可以考虑一下
-		// 路径应该从哪里获取，全局变量还是config中？
+		// Clone suite to avoid modifying global
+		suiteCopy := *hs.suite
+		hs.suite = &suiteCopy
+
+		// Clone KA
+		newKA := *sm2ka
+		hs.suite.ka = &newKA
+		keyAgreement = &newKA
+
+		newKA.localId = hs.localId
+		newKA.remoteId = hs.remoteId
+
+		// 加载私钥
 		localPrivateKey, err := ccrypto.LoadPrivateKeyFileFromPEM(filepath.Join(s.conn.config.keyStorePath(), hs.localId, "private_key.pem"))
-		sm2ka.localStaticPrivateKey = localPrivateKey
 		if err != nil {
-			return err
+			return s.out.setErrorLocked(err)
 		}
+
+		// 加载公钥
 		remotePublicKey, err := ccrypto.LoadPublicKeyFileFromPEM(filepath.Join(s.conn.config.keyStorePath(), hs.remoteId, "public_key.pem"))
-		sm2ka.remoteStaticPublicKey = remotePublicKey
 		if err != nil {
-			return err
+			return s.out.setErrorLocked(err)
 		}
+		newKA.localStaticPrivateKey = localPrivateKey
+		newKA.remoteStaticPublicKey = remotePublicKey
+
+		// Init KAPCtx
+		localECKEY, err := ccrypto.ToECKey(localPrivateKey)
+		if err != nil {
+			return hs.s.out.setErrorLocked(err)
+		}
+		remoteECKEY, err := ccrypto.ToECKey(remotePublicKey)
+		if err != nil {
+			return hs.s.out.setErrorLocked(err)
+		}
+
+		ctxLocal := sm2keyexch.NewKAPCtx()
+		// Initiator rule: lexicographical order if symmetric
+		isInitiator := hs.localId > hs.remoteId
+		if err := ctxLocal.Init(localECKEY, hs.localId, remoteECKEY, hs.remoteId, isInitiator, true); err != nil {
+			return hs.s.out.setErrorLocked(err)
+		}
+		newKA.ctxLocal = ctxLocal
 	}
 	// 先发自己的 keyExchangeMsg
 	localKxm, err := keyAgreement.generateLocalKeyExchange(s.conn.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg)
@@ -393,7 +424,7 @@ func (hs *handshakeState) sendFinished(out []byte) error {
 func (hs *handshakeState) readFinished(out []byte) error {
 	s := hs.s
 
-	if err := s.conn.readChangeCipherSpec(); err != nil {
+	if err := s.readChangeCipherSpec(); err != nil {
 		return err
 	}
 

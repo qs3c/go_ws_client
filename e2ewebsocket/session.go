@@ -16,7 +16,6 @@ import (
 
 type SessionID string
 
-
 // Session: 负责单个逻辑会话的协商和加密
 type Session struct {
 	// 初始化时要填入的参数
@@ -40,13 +39,22 @@ type Session struct {
 	remoteFinished      [12]byte
 
 	hand [][]byte
+
+	handshakeChan chan sessionMsg
+}
+
+type sessionMsg struct {
+	typ  recordType
+	data []byte
+	err  error
 }
 
 func NewSession(id SessionID, remoteId string, conn *Conn) *Session {
 	s := Session{
-		id:       id,
-		remoteId: remoteId,
-		conn:     conn,
+		id:            id,
+		remoteId:      remoteId,
+		conn:          conn,
+		handshakeChan: make(chan sessionMsg, 16),
 	}
 	s.handshakeFn = s.symHandshake
 	return &s
@@ -152,11 +160,25 @@ func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 // 读取握手数据方法在 session 上，读应用数据方法在 conn 上，源泵方法在 conn 上
 func (s *Session) readHandshake(transcript transcriptHash) (any, error) {
 
-	// 合理应该弄一个最高上限次数，或者说超时时间，不能一致循环在这里
-	// 其实感觉 readRecord 这个函数可能会有并发问题啊！是不是！
+	// 循环读取直到 accumulating 的 hand 缓冲区有数据
 	for len(s.hand) == 0 {
-		if err := s.conn.readRecord(); err != nil {
-			return nil, err
+		select {
+		case msg, ok := <-s.handshakeChan:
+			if !ok {
+				return nil, errors.New("handshake channel closed")
+			}
+			if msg.err != nil {
+				return nil, msg.err
+			}
+			if msg.typ == recordTypeHandshake {
+				s.hand = append(s.hand, msg.data)
+			} else if msg.typ == recordTypeChangeCipherSpec {
+				// 意外收到了 CCS，虽然 RFC 不允许分片，但如果提前收到了 CCS...
+				// 暂时报错
+				return nil, s.in.setErrorLocked(errors.New("unexpected CCS during handshake read"))
+			} else {
+				return nil, s.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+			}
 		}
 	}
 
@@ -175,6 +197,33 @@ func (s *Session) readHandshake(transcript transcriptHash) (any, error) {
 	return s.unmarshalHandshakeMessage(data, transcript)
 }
 
+func (s *Session) readChangeCipherSpec() error {
+	select {
+	case msg, ok := <-s.handshakeChan:
+		if !ok {
+			return errors.New("handshake channel closed")
+		}
+		if msg.err != nil {
+			return msg.err
+		}
+		if msg.typ == recordTypeChangeCipherSpec {
+			// 在 readLoop 中已经调用了 changeCipherSpec()，这里只需要确认收到即可
+			// 校验数据
+			if len(msg.data) != 1 || msg.data[0] != 1 {
+				return s.in.setErrorLocked(errors.New("alertDecodeError"))
+			}
+			return nil
+		}
+		// 如果读到了 handshake 消息，放入缓冲区?
+		if msg.typ == recordTypeHandshake {
+			s.hand = append(s.hand, msg.data)
+			// 继续读? 不，调用方期望读 CCS，读到别的就是错的 (除非是 Warning Alert? 但这里简化了)
+			return s.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		}
+		return s.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+	}
+}
+
 func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHash) (handshakeMessage, error) {
 	// [1字节类型|和消息内容]
 	// 无需长度
@@ -182,7 +231,10 @@ func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHa
 	switch data[0] {
 	case typeHelloMsg:
 		m = new(helloMsg)
-	// todo  补充其他消息
+	case typeKeyExchange:
+		m = new(keyExchangeMsg)
+	case typeFinished:
+		m = new(finishedMsg)
 	default:
 		return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
 	}
@@ -311,6 +363,9 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 				return nil, errors.New("alertNonceZero")
 			}
 			payload = payload[explicitNonceLen:]
+			if len(payload) < c.Overhead() {
+				return nil, errors.New("alertBadRecordMAC")
+			}
 
 			// 构造 additionalData
 			var additionalData []byte
