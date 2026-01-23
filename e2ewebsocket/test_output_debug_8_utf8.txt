@@ -1,0 +1,14 @@
+﻿=== RUN   TestE2E_Concurrent
+2026/01/23 20:24:47 errKeyExchange: ComputeKey failed: SM2_KAP_compute_key failed
+    e2e_test.go:260: Alice write failed: invalid KeyExchange message
+    e2e_test.go:332: Test timed out
+2026/01/23 20:24:52 readLoop ReadMessage error: read tcp 127.0.0.1:54169->127.0.0.1:54167: use of closed network connection
+2026/01/23 20:24:52 readLoop exited
+2026/01/23 20:24:52 Passive handshake failed for session alice_bob: handshake channel closed
+2026/01/23 20:24:52 readLoop ReadMessage error: read tcp 127.0.0.1:54168->127.0.0.1:54167: use of closed network connection
+2026/01/23 20:24:52 readLoop exited
+    e2e_test.go:315: Alice ReadMessage error: read tcp 127.0.0.1:54168->127.0.0.1:54167: use of closed network connection
+--- FAIL: TestE2E_Concurrent (5.03s)
+FAIL
+FAIL	github.com/albert/ws_client/e2ewebsocket	6.701s
+FAIL

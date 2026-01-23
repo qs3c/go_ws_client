@@ -105,7 +105,7 @@ var cipherSuitesPreferenceOrder = []uint16{
 
 // 目前密码套件仅一种实现
 var cipherSuites = map[uint16]*cipherSuite{
-	E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3: {E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3, 16, 0, 4, sm2KA, suiteTLS12, nil, nil, sm4tongsuo.NewSm4AEADCipher},
+	E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3: {E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3, 16, 0, 4, sm2KA, suiteTLS12 | suiteSM3, nil, nil, sm4tongsuo.NewSm4AEADCipher},
 	// E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3: {E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3, 16, 0, 4, mlkemsm2KA, suiteTLS12, nil, nil, sm4tongsuo.NewSm4AEADCipher},
 }
 

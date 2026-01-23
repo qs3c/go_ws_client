@@ -1,0 +1,45 @@
+﻿=== RUN   TestE2E_Concurrent
+2026/01/23 19:47:13 decrypt start: payloadLen=95 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:47:13 decrypt start: payloadLen=95 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:47:13 decrypt start: payloadLen=148 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:47:13 decrypt start: payloadLen=148 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:47:13 SM2 KeyAgreement Success: local=alice remote=bob secret=37305f59198e71168bcdb30035081c278e62d69a6b657ead6006a4848a860a608ded143280b6eb50cc3f55665dadb637
+2026/01/23 19:47:13 SM2 KeyAgreement Success: local=bob remote=alice secret=37305f59198e71168bcdb30035081c278e62d69a6b657ead6006a4848a860a608ded143280b6eb50cc3f55665dadb637
+establishKeys details:
+masterSecret=9be04e9baf77b2a5ddb72e09546f1644b7f600a006896613da67d4fbe273093cd64fba21b0bff45df14664179a44f8ee
+clientRandom=6a7b42c5eebb5b86c0194651de55dcd149a6c7261dbe89654bae48e72982f093
+serverRandom=5a646cd022aed636b343ba0a263f7784a520455500ad8409a5385ef0f854fb5d
+establishKeys: isClient=true
+clientKey=8b1a380b257f733c5b5b23da6b573b4a
+serverKey=23e2d8ca98c2cc6dc7f69ea67fc2bb0a
+clientIV=18578010
+serverIV=ee38a1fe
+establishKeys details:
+masterSecret=9be04e9baf77b2a5ddb72e09546f1644b7f600a006896613da67d4fbe273093cd64fba21b0bff45df14664179a44f8ee
+clientRandom=6a7b42c5eebb5b86c0194651de55dcd149a6c7261dbe89654bae48e72982f093
+serverRandom=5a646cd022aed636b343ba0a263f7784a520455500ad8409a5385ef0f854fb5d
+establishKeys: isClient=false
+clientKey=8b1a380b257f733c5b5b23da6b573b4a
+serverKey=23e2d8ca98c2cc6dc7f69ea67fc2bb0a
+clientIV=18578010
+serverIV=ee38a1fe
+2026/01/23 19:47:13 encrypt: seq=0000000000000000 nonce=000000000000000000000000 payloadLen=16 aad=00000000000000000010
+2026/01/23 19:47:13 decrypt start: payloadLen=1 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:47:13 decrypt start: payloadLen=1 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:47:13 encrypt: seq=0000000000000000 nonce=000000000000000000000000 payloadLen=16 aad=00000000000000000010
+2026/01/23 19:47:13 decrypt start: payloadLen=44 explicitNonceLen=12 cipher=*sm4tongsuo.sm4AEADCipher
+2026/01/23 19:47:13 decrypt: seq=0000000000000000 nonce=000000000000000000000000 payloadLen=32 aad=00000000000000000010
+2026/01/23 19:47:13 decrypt start: payloadLen=44 explicitNonceLen=12 cipher=*sm4tongsuo.sm4AEADCipher
+2026/01/23 19:47:13 decrypt: seq=0000000000000000 nonce=000000000000000000000000 payloadLen=32 aad=00000000000000000010
+    e2e_test.go:260: Alice write failed: alertHandshakeFailure
+2026/01/23 19:47:13 Passive handshake failed for session alice_bob: alertHandshakeFailure
+    e2e_test.go:332: Test timed out
+2026/01/23 19:47:18 readLoop ReadMessage error: read tcp 127.0.0.1:52016->127.0.0.1:52014: use of closed network connection
+2026/01/23 19:47:18 readLoop exited
+2026/01/23 19:47:18 readLoop ReadMessage error: read tcp 127.0.0.1:52015->127.0.0.1:52014: use of closed network connection
+2026/01/23 19:47:18 readLoop exited
+    e2e_test.go:315: Alice ReadMessage error: read tcp 127.0.0.1:52015->127.0.0.1:52014: use of closed network connection
+--- FAIL: TestE2E_Concurrent (5.03s)
+FAIL
+FAIL	github.com/albert/ws_client/e2ewebsocket	6.754s
+FAIL

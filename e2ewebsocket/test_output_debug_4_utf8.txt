@@ -1,0 +1,40 @@
+﻿=== RUN   TestE2E_Concurrent
+2026/01/23 19:41:38 decrypt start: payloadLen=95 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:41:38 decrypt start: payloadLen=95 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:41:38 decrypt start: payloadLen=147 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:41:38 decrypt start: payloadLen=148 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:41:38 SM2 KeyAgreement Success: local=bob remote=alice secret=06e52c75a1a67c4651b8a1cb283b4c8b9c3c05b85d2e4e3073f8d961fbbd54bc367b16b30f640495fecf9a3b9e75329b
+2026/01/23 19:41:38 SM2 KeyAgreement Success: local=alice remote=bob secret=06e52c75a1a67c4651b8a1cb283b4c8b9c3c05b85d2e4e3073f8d961fbbd54bc367b16b30f640495fecf9a3b9e75329b
+establishKeys details:
+masterSecret=aa67a949692b3999aa2928f77fc94c82776443d0b065aa5e3c629ad9f6d8ce0ff093726ccc4fac8c2e533e879fa602d0
+clientRandom=e61d348cae81e9d8dd2c8d769d521b3e4d6a2990f9992ece2049e1e652d690ce
+serverRandom=6ad1a9676a2758e578f3cb75ccac46930ab118cc44a245566a0900baf17a4b94
+establishKeys: isClient=false
+clientKey=6961acf911a223bb43758af7498c737b
+serverKey=e53952a8b39340dc0320103515cd8f14
+clientIV=df535b71
+serverIV=e8506cf1
+establishKeys details:
+masterSecret=aa67a949692b3999aa2928f77fc94c82776443d0b065aa5e3c629ad9f6d8ce0ff093726ccc4fac8c2e533e879fa602d0
+clientRandom=e61d348cae81e9d8dd2c8d769d521b3e4d6a2990f9992ece2049e1e652d690ce
+serverRandom=6ad1a9676a2758e578f3cb75ccac46930ab118cc44a245566a0900baf17a4b94
+establishKeys: isClient=true
+clientKey=6961acf911a223bb43758af7498c737b
+serverKey=e53952a8b39340dc0320103515cd8f14
+clientIV=df535b71
+serverIV=e8506cf1
+2026/01/23 19:41:38 decrypt start: payloadLen=1 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:41:38 decrypt start: payloadLen=1 explicitNonceLen=0 cipher=<nil>
+2026/01/23 19:41:38 decrypt start: payloadLen=16 explicitNonceLen=12 cipher=*sm4tongsuo.sm4AEADCipher
+2026/01/23 19:41:38 readLoop decrypt error: alertBadRecordMAC
+2026/01/23 19:41:38 readLoop exited
+2026/01/23 19:41:38 Passive handshake failed for session alice_bob: handshake channel closed
+2026/01/23 19:41:38 decrypt start: payloadLen=16 explicitNonceLen=12 cipher=*sm4tongsuo.sm4AEADCipher
+2026/01/23 19:41:38 readLoop decrypt error: alertBadRecordMAC
+2026/01/23 19:41:38 readLoop exited
+    e2e_test.go:260: Alice write failed: handshake channel closed
+    e2e_test.go:315: Alice ReadMessage error: alertBadRecordMAC
+--- FAIL: TestE2E_Concurrent (0.06s)
+FAIL
+FAIL	github.com/albert/ws_client/e2ewebsocket	1.842s
+FAIL

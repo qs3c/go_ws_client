@@ -22,8 +22,6 @@ import (
 
 // 基于 sm4Encrypter 和 sm4Decrypter 实现 aead 接口 【其实不实现也可以的】
 
-
-
 // func NewSm4AEADCipher(key, iv []byte, isEncrypt bool) cipher.AEAD {
 // 	if isEncrypt {
 // 		return NewSm4AEADEncrypter(key, iv)
@@ -54,6 +52,11 @@ func NewSm4AEADCipher(key, iv []byte) cipher.AEAD {
 }
 
 func (c *sm4AEADCipher) Seal(dst, nonce, plaintext, aad []byte) []byte {
+	// 设置 IV
+	if len(nonce) != len(c.enc.iv) {
+		c.enc.SetIVLen(len(nonce))
+	}
+	c.enc.iv = nonce
 	// 设置 AAD
 	c.enc.SetAAD(aad)
 	// 加密
@@ -75,6 +78,11 @@ func (c *sm4AEADCipher) Seal(dst, nonce, plaintext, aad []byte) []byte {
 }
 
 func (c *sm4AEADCipher) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error) {
+	// 设置 IV
+	if len(nonce) != len(c.dec.iv) {
+		c.dec.SetIVLen(len(nonce))
+	}
+	c.dec.iv = nonce
 	// 设置 AAD
 	c.dec.SetAAD(aad)
 	tag := ciphertext[len(ciphertext)-c.Overhead():]
@@ -124,6 +132,11 @@ func NewSm4AEADEncrypter(key, iv []byte) *sm4AEADEncrypter {
 }
 
 func (e *sm4AEADEncrypter) Seal(dst, nonce, plaintext, aad []byte) []byte {
+	// 设置 IV
+	if len(nonce) != len(e.enc.iv) {
+		e.enc.SetIVLen(len(nonce))
+	}
+	e.enc.iv = nonce
 	// 设置 AAD
 	e.enc.SetAAD(aad)
 	// 加密
@@ -184,6 +197,11 @@ func NewSm4AEADDecrypter(key, iv []byte) *sm4AEADDecrypter {
 }
 
 func (e *sm4AEADDecrypter) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error) {
+	// 设置 IV
+	if len(nonce) != len(e.dec.iv) {
+		e.dec.SetIVLen(len(nonce))
+	}
+	e.dec.iv = nonce
 	// 设置 AAD
 	e.dec.SetAAD(aad)
 	tag := ciphertext[len(ciphertext)-e.Overhead():]

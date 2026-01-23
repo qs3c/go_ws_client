@@ -1,0 +1,32 @@
+﻿=== RUN   TestE2E_Concurrent
+2026/01/23 19:21:22 SM2 KeyAgreement Success: local=bob remote=alice secret=0258ef70345a38d083d47a9a54a25ccb23085c093e4abe53b4da9a1124265170827dca63c9eabf00c3e41754a8fd5434
+2026/01/23 19:21:22 SM2 KeyAgreement Success: local=alice remote=bob secret=0258ef70345a38d083d47a9a54a25ccb23085c093e4abe53b4da9a1124265170827dca63c9eabf00c3e41754a8fd5434
+establishKeys details:
+masterSecret=6b39a5fba76036d79fff9703e8d423c5279a90db2088ea2747530885c75cc4689e18b3ecb34519116b5e0a2f7030b6b6
+clientRandom=35c30d74a59cfd9f79dca910f52fabb4cbff0e8e2f5f1ff36cf1520ba3385b68
+serverRandom=4e3b8724b56f262936e06e7309f60ad472bb3f4aa21be2a86fc80e3ab6a869ad
+establishKeys details:
+masterSecret=fc7719ea4ae4336e0f674201caf8a67f9a40fd895dd688b810a8f8b4d0c91e7bb05bfa3cafdce631cd5c2a4f60386780
+clientRandom=35c30d74a59cfd9f79dca910f52fabb4cbff0e8e2f5f1ff36cf1520ba3385b68
+serverRandom=4e3b8724b56f262936e06e7309f60ad472bb3f4aa21be2a86fc80e3ab6a869ad
+establishKeys: isClient=true
+clientKey=9acf86945655dc128ec37bdb7683cf42
+serverKey=364907ec60a5e3f60c9c6b3cfc4047b6
+clientIV=ce9bb7fe
+serverIV=9f9eeed6
+establishKeys: isClient=false
+clientKey=d451388acacb6dfc017a35ab74db9974
+serverKey=61bb37d1a3982e640880ba2dcdb5ccdc
+clientIV=797ff1fa
+serverIV=524b7c9a
+2026/01/23 19:21:22 readLoop decrypt error: alertBadRecordMAC
+2026/01/23 19:21:22 readLoop exited
+2026/01/23 19:21:22 Passive handshake failed for session alice_bob: handshake channel closed
+2026/01/23 19:21:22 readLoop decrypt error: alertBadRecordMAC
+2026/01/23 19:21:22 readLoop exited
+    e2e_test.go:260: Alice write failed: handshake channel closed
+    e2e_test.go:315: Alice ReadMessage error: alertBadRecordMAC
+--- FAIL: TestE2E_Concurrent (0.07s)
+FAIL
+FAIL	github.com/albert/ws_client/e2ewebsocket	1.682s
+FAIL

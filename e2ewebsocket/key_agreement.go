@@ -3,7 +3,9 @@ package e2ewebsocket
 import (
 	"crypto"
 	"crypto/sha1"
+	"encoding/hex"
 	"errors"
+	"log"
 
 	ccrypto "github.com/albert/ws_client/crypto"
 	"github.com/albert/ws_client/crypto/sm2keyexch"
@@ -117,6 +119,7 @@ func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, signatureSch
 func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureScheme SignatureScheme, hello *helloMsg, remoteHello *helloMsg, kxm *keyExchangeMsg) ([]byte, error) {
 	// 第一部分：验证临时公钥
 	if len(kxm.key) < 4 {
+		log.Printf("kxm len < 4: %d", len(kxm.key))
 		return nil, errKeyExchange
 	}
 	if kxm.key[0] != 3 { // named curve
@@ -136,6 +139,7 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	// publicKey 是 RB
 	publicLen := int(kxm.key[3])
 	if publicLen+4 > len(kxm.key) {
+		log.Printf("publicLen+4 > len(kxm.key): %d+4 > %d", publicLen, len(kxm.key))
 		return nil, errKeyExchange
 	}
 	remoteECDHEParams := kxm.key[:4+publicLen]
@@ -143,6 +147,7 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 
 	sig := kxm.key[4+publicLen:]
 	if len(sig) < 2 {
+		log.Printf("errKeyExchange: len(sig) < 2 (at start): %d", len(sig))
 		return nil, errKeyExchange
 	}
 
@@ -175,9 +180,11 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	// 长度暂定 48 (Master Secret Length)
 	sharedKey, _, err := ka.ctxLocal.ComputeKey(publicKey, 48)
 	if err != nil {
+		log.Printf("errKeyExchange: ComputeKey failed: %v", err)
 		return nil, errKeyExchange
 	}
 	ka.preMasterSecret = sharedKey
+	log.Printf("SM2 KeyAgreement Success: local=%s remote=%s secret=%s", ka.localId, ka.remoteId, hex.EncodeToString(ka.preMasterSecret))
 
 	// 把自己的临时公钥做成 clientKeyExchangeMsg【放到下面去！】
 	// ourPublicKey := key.PublicKey().Bytes()
@@ -193,6 +200,7 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	signatureAlgorithm := SignatureScheme(sig[0])<<8 | SignatureScheme(sig[1])
 	sig = sig[2:]
 	if len(sig) < 2 {
+		log.Printf("errKeyExchange: len(sig) < 2 (after algo): %d", len(sig))
 		return nil, errKeyExchange
 	}
 
@@ -211,12 +219,14 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 
 	// if (sigType == signaturePKCS1v15 || sigType == signatureRSAPSS) != ka.isRSA {
 	if sigType != signatureSM2 {
+		log.Printf("errKeyExchange: sigType != signatureSM2: %d", sigType)
 		// SM2 密钥协商中不可以用其他签名只能用 SM2	 签名
 		return nil, errKeyExchange
 	}
 
 	sigLen := int(sig[0])<<8 | int(sig[1])
 	if sigLen+2 != len(sig) {
+		log.Printf("sigLen+2 != len(sig): %d+2 != %d", sigLen, len(sig))
 		return nil, errKeyExchange
 	}
 	sig = sig[2:]

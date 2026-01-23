@@ -1,0 +1,7 @@
+﻿=== RUN   TestE2E_Concurrent
+    e2e_test.go:260: Alice write failed: invalid KeyExchange message
+    e2e_test.go:332: Test timed out
+--- FAIL: TestE2E_Concurrent (5.04s)
+FAIL
+FAIL	github.com/albert/ws_client/e2ewebsocket	6.746s
+FAIL

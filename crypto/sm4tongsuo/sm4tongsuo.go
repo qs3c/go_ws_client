@@ -163,16 +163,17 @@ func (ctx *sm4Decrypter) SetTag(tag []byte) {
 func (ctx *sm4Decrypter) DecryptAll(src []byte) ([]byte, error) {
 
 	// 如果是GCM和CCM模式，加密会生成tag，解密需要设置 tag
+	err := ctx.cctx.SetKeyAndIV(ctx.key, ctx.iv)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set key or iv: %w", err)
+	}
+
+	// 如果是GCM和CCM模式，加密会生成tag，解密需要设置 tag
 	if ctx.tag != nil {
 		err := ctx.cctx.SetCtrlBytes(C.EVP_CTRL_AEAD_SET_TAG, len(ctx.tag), ctx.tag)
 		if err != nil {
 			return nil, fmt.Errorf("failed to set tag: %w", err)
 		}
-	}
-
-	err := ctx.cctx.SetKeyAndIV(ctx.key, ctx.iv)
-	if err != nil {
-		return nil, fmt.Errorf("failed to set key or iv: %w", err)
 	}
 
 	var tmplen C.int
@@ -212,6 +213,10 @@ func (ctx *sm4Decrypter) DecryptAll(src []byte) ([]byte, error) {
 
 func (ctx *sm4Decrypter) SetPadding(pad bool) {
 	ctx.cctx.SetPadding(pad)
+}
+
+func (ctx *sm4Decrypter) SetIVLen(length int) error {
+	return ctx.cctx.SetCtrl(C.EVP_CTRL_AEAD_SET_IVLEN, length)
 }
 
 // 根据 mode 生成不同的 Encrypter
@@ -329,6 +334,10 @@ func (ctx *sm4Encrypter) EncryptAll(src []byte) ([]byte, error) {
 // 是否启用自动 padding，默认都是启用的
 func (ctx *sm4Encrypter) SetPadding(pad bool) {
 	ctx.cctx.SetPadding(pad)
+}
+
+func (ctx *sm4Encrypter) SetIVLen(length int) error {
+	return ctx.cctx.SetCtrl(C.EVP_CTRL_AEAD_SET_IVLEN, length)
 }
 
 // func (b *Block) Decrypt(dst, src []byte) {

@@ -341,40 +341,83 @@ func (hs *handshakeState) doFullHandshake() error {
 		}
 		newKA.ctxLocal = ctxLocal
 	}
-	// 先发自己的 keyExchangeMsg
+	// Determine role (Same as establishKeys)
+	isClient := hs.localId < hs.remoteId
+
+	// 1. Always Generate Local KEK first to initialize Ephemeral Keys (Prepare)
+	// This ensures ctxLocal has the necessary state (RB/RA) before any ComputeKey operation.
 	localKxm, err := keyAgreement.generateLocalKeyExchange(s.conn.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg)
 	if err != nil {
 		s.out.setErrorLocked(errors.New("alertInternalError"))
 		return err
 	}
-	if localKxm != nil {
-		if err := s.writeHandshakeRecord(localKxm, &hs.finishedHash); err != nil {
-			return err
+
+	// Helper to write the pre-generated local KEK
+	writeKXM := func() error {
+		if localKxm != nil {
+			if err := s.writeHandshakeRecord(localKxm, &hs.finishedHash); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
 
-	// 在收对方的 keyExchangeMsg
-	msg, err := s.readHandshake(&hs.finishedHash)
-	if err != nil {
-		return err
-	}
-	remoteKxm, ok := msg.(*keyExchangeMsg)
+	// Helper to read remote KEK
 	var preMasterSecret []byte
-	if ok {
-		preMasterSecret, err = keyAgreement.processRemoteKeyExchange(s.conn.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg, remoteKxm)
+	readKXM := func() error {
+		msg, err := s.readHandshake(&hs.finishedHash)
 		if err != nil {
-			s.out.setErrorLocked(errors.New("alertIllegalParameter"))
 			return err
 		}
-		// 获取曲线并记录
-		if len(remoteKxm.key) >= 3 && remoteKxm.key[0] == 3 /* named curve */ {
-			s.curveID = CurveID(BEUint16(remoteKxm.key[1:]))
+		remoteKxm, ok := msg.(*keyExchangeMsg)
+		if ok {
+			preMasterSecret, err = keyAgreement.processRemoteKeyExchange(s.conn.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg, remoteKxm)
+			if err != nil {
+				s.out.setErrorLocked(errors.New("alertIllegalParameter"))
+				return err
+			}
+			// 获取曲线并记录
+			if len(remoteKxm.key) >= 3 && remoteKxm.key[0] == 3 /* named curve */ {
+				s.curveID = CurveID(BEUint16(remoteKxm.key[1:]))
+			}
+		} else {
+			return errors.New("expected keyExchangeMsg")
 		}
+		return nil
+	}
 
+	// Ensure deterministic transcript order: Server(write) -> Client(read) -> Client(write) -> Server(read)
+	// Transcript should be: ... [ServerKEK] [ClientKEK] ...
+	if isClient {
+		// Client: Read Server KEK first, then Write Client KEK
+		// keyAgreement state is ready because we called generateLocalKeyExchange above.
+		if err := readKXM(); err != nil {
+			return err
+		}
+		if err := writeKXM(); err != nil {
+			return err
+		}
+	} else {
+		// Server: Write Server KEK first, then Read Client KEK
+		if err := writeKXM(); err != nil {
+			return err
+		}
+		if err := readKXM(); err != nil {
+			return err
+		}
 	}
 
 	// sm2 的 initiator 逻辑影响到了外面，hs得有状态记录
-	hs.masterSecret = masterFromPreMasterSecret(s.vers, hs.suite, preMasterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random)
+	// Determine role to order Randoms correctly (ClientRandom + ServerRandom)
+	var clientRandom, serverRandom []byte
+	if hs.localId < hs.remoteId {
+		clientRandom = hs.helloMsg.random
+		serverRandom = hs.remoteHelloMsg.random
+	} else {
+		clientRandom = hs.remoteHelloMsg.random
+		serverRandom = hs.helloMsg.random
+	}
+	hs.masterSecret = masterFromPreMasterSecret(s.vers, hs.suite, preMasterSecret, clientRandom, serverRandom)
 
 	// hs.finishedHash.discardHandshakeBuffer()
 
@@ -386,10 +429,25 @@ func (hs *handshakeState) establishKeys() error {
 	// 到这里你就发现sm2影响的不是只ka内部的逻辑了
 	// 甚至是影响到了外面，这里关于keys的生成
 
+	// Determine role based on ID comparison (lexicographical order)
+	// Smaller ID acts as "Client" (Initiator for TLS PRF), Larger ID acts as "Server"
+	isClient := hs.localId < hs.remoteId
+
+	var clientRandom, serverRandom []byte
+	if isClient {
+		clientRandom = hs.helloMsg.random
+		serverRandom = hs.remoteHelloMsg.random
+	} else {
+		clientRandom = hs.remoteHelloMsg.random
+		serverRandom = hs.helloMsg.random
+	}
+
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
-		keysFromMasterSecret(s.vers, hs.suite, hs.masterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
+		keysFromMasterSecret(s.vers, hs.suite, hs.masterSecret, clientRandom, serverRandom, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
+
 	var clientCipher, serverCipher any
 	var clientHash, serverHash hash.Hash
+
 	if hs.suite.cipher != nil {
 		clientCipher = hs.suite.cipher(clientKey, clientIV, false /* not for reading */)
 		clientHash = hs.suite.mac(clientMAC)
@@ -400,8 +458,13 @@ func (hs *handshakeState) establishKeys() error {
 		serverCipher = hs.suite.aead(serverKey, serverIV)
 	}
 
-	s.in.prepareCipherSpec(s.vers, serverCipher, serverHash)
-	s.out.prepareCipherSpec(s.vers, clientCipher, clientHash)
+	if isClient {
+		s.in.prepareCipherSpec(s.vers, serverCipher, serverHash)
+		s.out.prepareCipherSpec(s.vers, clientCipher, clientHash)
+	} else {
+		s.in.prepareCipherSpec(s.vers, clientCipher, clientHash)
+		s.out.prepareCipherSpec(s.vers, serverCipher, serverHash)
+	}
 	return nil
 }
 
@@ -414,6 +477,7 @@ func (hs *handshakeState) sendFinished(out []byte) error {
 
 	finished := new(finishedMsg)
 	finished.verifyData = hs.finishedHash.localSum(hs.masterSecret)
+	fmt.Printf("sendFinished: calculated verifyData: %x\n", finished.verifyData)
 	if err := s.writeHandshakeRecord(finished, &hs.finishedHash); err != nil {
 		return err
 	}
@@ -443,6 +507,7 @@ func (hs *handshakeState) readFinished(out []byte) error {
 	verify := hs.finishedHash.remoteSum(hs.masterSecret)
 	if len(verify) != len(serverFinished.verifyData) ||
 		subtle.ConstantTimeCompare(verify, serverFinished.verifyData) != 1 {
+		fmt.Printf("readFinished: verify mismatch!\nexpected: %x\nreceived: %x\n", verify, serverFinished.verifyData)
 		return s.out.setErrorLocked(errors.New("alertHandshakeFailure"))
 	}
 

@@ -927,3 +927,35 @@ func LoadPublicKeyFileFromDER(path string) (EVPPublicKey, error) {
 	}
 	return LoadPublicKeyFromDER(data)
 }
+
+func SavePrivateKeyFileToPEM(path string, key EVPPrivateKey) error {
+	data, err := key.MarshalPKCS8PrivateKeyPEM()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func SavePrivateKeyFileToDER(path string, key EVPPrivateKey) error {
+	data, err := key.MarshalPKCS1PrivateKeyDER()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func SavePublicKeyFileToPEM(path string, key EVPPublicKey) error {
+	data, err := key.MarshalPKIXPublicKeyPEM()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func SavePublicKeyFileToDER(path string, key EVPPublicKey) error {
+	data, err := key.MarshalPKIXPublicKeyDER()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}

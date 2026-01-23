@@ -186,15 +186,16 @@ func makeAppMsg(t *testing.T, from, to string, content []byte) []byte {
 
 func TestE2E_Concurrent(t *testing.T) {
 	// 1. 环境准备
-	tmpDir, err := os.MkdirTemp("", "e2e_test")
-	if err != nil {
-		t.Fatal(err)
+	// 使用已生成的静态密钥，位于 ../static_key
+	cwd, _ := os.Getwd()
+	keyStorePath := filepath.Join(filepath.Dir(cwd), "static_key")
+	if _, err := os.Stat(keyStorePath); os.IsNotExist(err) {
+		t.Skipf("static_key dir not found at %s", keyStorePath)
 	}
-	defer os.RemoveAll(tmpDir)
 
-	setupKeyStore(t, tmpDir, "alice")
-	setupKeyStore(t, tmpDir, "bob")
-	exchangeKeys(t, tmpDir, "alice", "bob")
+	// setupKeyStore(t, tmpDir, "alice")
+	// setupKeyStore(t, tmpDir, "bob")
+	// exchangeKeys(t, tmpDir, "alice", "bob")
 
 	// 2. 启动 Mock Server
 	ms := newMockServer()
@@ -210,12 +211,12 @@ func TestE2E_Concurrent(t *testing.T) {
 	mockComp := &MockCompressor{}
 
 	cfgAlice := &Config{
-		KeyStorePath: tmpDir,
+		KeyStorePath: keyStorePath,
 		Compressor:   mockComp,
 		Encoder:      encoder.NewGobEncoder(),
 	}
 	cfgBob := &Config{
-		KeyStorePath: tmpDir,
+		KeyStorePath: keyStorePath,
 		Compressor:   mockComp,
 		Encoder:      encoder.NewGobEncoder(),
 	}

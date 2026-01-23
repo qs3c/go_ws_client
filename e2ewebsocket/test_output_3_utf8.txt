@@ -1,0 +1,14 @@
+﻿=== RUN   TestE2E_Concurrent
+2026/01/23 16:01:55 SM2 KeyAgreement Success: local=alice remote=bob secret=9cec9cf871068e734140139ffeea1d2b42427f01333066da00cbe345a4ac3bc34a901fbc52cb5561014dd5d30bca191f
+2026/01/23 16:01:55 SM2 KeyAgreement Success: local=bob remote=alice secret=9cec9cf871068e734140139ffeea1d2b42427f01333066da00cbe345a4ac3bc34a901fbc52cb5561014dd5d30bca191f
+2026/01/23 16:01:55 readLoop decrypt error: alertBadRecordMAC
+2026/01/23 16:01:55 readLoop exited
+    e2e_test.go:260: Alice write failed: handshake channel closed
+    e2e_test.go:315: Alice ReadMessage error: alertBadRecordMAC
+2026/01/23 16:01:55 readLoop decrypt error: alertBadRecordMAC
+2026/01/23 16:01:55 readLoop exited
+2026/01/23 16:01:55 Passive handshake failed for session alice_bob: handshake channel closed
+--- FAIL: TestE2E_Concurrent (0.07s)
+FAIL
+FAIL	github.com/albert/ws_client/e2ewebsocket	1.857s
+FAIL

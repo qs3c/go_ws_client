@@ -276,7 +276,10 @@ func (s *Session) writeChangeCipherRecord() error {
 	// c.out.Lock()
 	// defer c.out.Unlock()
 	err := s.conn.writeRecordLocked(recordTypeChangeCipherSpec, []byte{1}, s)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.out.changeCipherSpec()
 }
 
 //  涉及重协商的这两个功能先不做
@@ -328,7 +331,7 @@ func (s *Session) writeChangeCipherRecord() error {
 // }
 
 type halfConn struct {
-	// sync.Mutex
+	sync.Mutex
 	err     error  // first permanent error
 	version uint16 // protocol version
 	cipher  any    // cipher algorithm
@@ -342,6 +345,8 @@ type halfConn struct {
 }
 
 func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
+	hc.Lock()
+	defer hc.Unlock()
 
 	// 我传进来的整个都是 payload 不是带 header 的 record
 	var plaintext []byte
@@ -444,6 +449,8 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 }
 
 func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, error) {
+	hc.Lock()
+	defer hc.Unlock()
 	if hc.cipher == nil {
 		return append(record, payload...), nil
 	}
@@ -511,12 +518,16 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 }
 
 func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash) {
+	hc.Lock()
+	defer hc.Unlock()
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
 }
 
 func (hc *halfConn) changeCipherSpec() error {
+	hc.Lock()
+	defer hc.Unlock()
 	if hc.nextCipher == nil {
 		return errors.New("alertInternalError")
 	}
@@ -584,6 +595,8 @@ func (e *permanentError) Timeout() bool   { return e.err.Timeout() }
 func (e *permanentError) Temporary() bool { return false }
 
 func (hc *halfConn) setErrorLocked(err error) error {
+	hc.Lock()
+	defer hc.Unlock()
 	if e, ok := err.(net.Error); ok {
 		hc.err = &permanentError{err: e}
 	} else {
