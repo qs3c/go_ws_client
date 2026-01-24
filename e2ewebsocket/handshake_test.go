@@ -3,6 +3,7 @@ package e2ewebsocket
 import (
 	"bytes"
 	"crypto/rand"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -978,4 +979,214 @@ func TestChangeCipherSpec(t *testing.T) {
 	assert.Equal(t, [8]byte{}, hc.seq)
 
 	t.Logf("ChangeCipherSpec 测试通过")
+}
+
+// ============================================================================
+// 静态密钥生成和集成测试
+// ============================================================================
+
+// setupTestKeys 为测试生成 SM2 密钥对并保存到指定目录
+func setupTestKeys(t *testing.T, keyStorePath string, userIds []string) {
+	t.Helper()
+
+	for _, userId := range userIds {
+		userDir := filepath.Join(keyStorePath, userId)
+		privateKeyPath := filepath.Join(userDir, "private_key.pem")
+		publicKeyPath := filepath.Join(userDir, "public_key.pem")
+
+		// 检查密钥是否已存在
+		if _, err := ccrypto.LoadPrivateKeyFileFromPEM(privateKeyPath); err == nil {
+			t.Logf("用户 %s 的密钥已存在，跳过生成", userId)
+			continue
+		}
+
+		// 创建用户目录
+		if err := createDirIfNotExist(userDir); err != nil {
+			t.Fatalf("创建目录 %s 失败: %v", userDir, err)
+		}
+
+		// 生成 SM2 密钥对
+		privateKey, err := ccrypto.GenerateECKey(ccrypto.SM2Curve)
+		if err != nil {
+			t.Fatalf("生成用户 %s 的密钥失败: %v", userId, err)
+		}
+
+		// 保存私钥
+		privateKeyPEM, err := privateKey.MarshalPKCS1PrivateKeyPEM()
+		if err != nil {
+			t.Fatalf("序列化用户 %s 的私钥失败: %v", userId, err)
+		}
+		if err := writeFile(privateKeyPath, privateKeyPEM); err != nil {
+			t.Fatalf("保存用户 %s 的私钥失败: %v", userId, err)
+		}
+
+		// 保存公钥
+		publicKey := privateKey.Public()
+		publicKeyPEM, err := publicKey.MarshalPKIXPublicKeyPEM()
+		if err != nil {
+			t.Fatalf("序列化用户 %s 的公钥失败: %v", userId, err)
+		}
+		if err := writeFile(publicKeyPath, publicKeyPEM); err != nil {
+			t.Fatalf("保存用户 %s 的公钥失败: %v", userId, err)
+		}
+
+		t.Logf("成功生成用户 %s 的密钥对", userId)
+	}
+}
+
+func createDirIfNotExist(path string) error {
+	if _, err := statFile(path); err == nil {
+		return nil
+	}
+	return mkdirAll(path, 0755)
+}
+
+// 用于测试的文件操作函数（可在需要时替换为 mock）
+var (
+	writeFile = func(path string, data []byte) error {
+		return writeFileImpl(path, data, 0644)
+	}
+	statFile = func(path string) (interface{}, error) {
+		return statFileImpl(path)
+	}
+	mkdirAll = func(path string, perm uint32) error {
+		return mkdirAllImpl(path, perm)
+	}
+)
+
+func writeFileImpl(path string, data []byte, perm uint32) error {
+	return os.WriteFile(path, data, os.FileMode(perm))
+}
+
+func statFileImpl(path string) (interface{}, error) {
+	return os.Stat(path)
+}
+
+func mkdirAllImpl(path string, perm uint32) error {
+	return os.MkdirAll(path, os.FileMode(perm))
+}
+
+// TestStaticKeyIntegration 使用静态密钥进行完整握手集成测试
+func TestStaticKeyIntegration(t *testing.T) {
+	keyStorePath := "./static_key"
+	aliceId := "alice"
+	bobId := "bob"
+
+	// 生成测试密钥
+	setupTestKeys(t, keyStorePath, []string{aliceId, bobId})
+
+	// 加载 Alice 的密钥
+	alicePrivPath := filepath.Join(keyStorePath, aliceId, "private_key.pem")
+	alicePubPath := filepath.Join(keyStorePath, aliceId, "public_key.pem")
+
+	alicePriv, err := ccrypto.LoadPrivateKeyFileFromPEM(alicePrivPath)
+	require.NoError(t, err, "加载 Alice 私钥失败")
+
+	alicePub, err := ccrypto.LoadPublicKeyFileFromPEM(alicePubPath)
+	require.NoError(t, err, "加载 Alice 公钥失败")
+
+	// 加载 Bob 的密钥
+	bobPrivPath := filepath.Join(keyStorePath, bobId, "private_key.pem")
+	bobPubPath := filepath.Join(keyStorePath, bobId, "public_key.pem")
+
+	bobPriv, err := ccrypto.LoadPrivateKeyFileFromPEM(bobPrivPath)
+	require.NoError(t, err, "加载 Bob 私钥失败")
+
+	bobPub, err := ccrypto.LoadPublicKeyFileFromPEM(bobPubPath)
+	require.NoError(t, err, "加载 Bob 公钥失败")
+
+	t.Logf("成功加载 Alice 和 Bob 的密钥对")
+	t.Logf("Alice 私钥类型: %d, Bob 私钥类型: %d", alicePriv.KeyType(), bobPriv.KeyType())
+	t.Logf("Alice 公钥类型: %d, Bob 公钥类型: %d", alicePub.KeyType(), bobPub.KeyType())
+
+	// 验证密钥类型是 SM2
+	assert.Equal(t, ccrypto.NidSM2, alicePriv.KeyType(), "Alice 私钥应为 SM2 类型")
+	assert.Equal(t, ccrypto.NidSM2, bobPriv.KeyType(), "Bob 私钥应为 SM2 类型")
+
+	t.Logf("静态密钥集成测试通过")
+}
+
+// BenchmarkFullHandshake 测量完整握手的耗时
+func BenchmarkFullHandshake(b *testing.B) {
+	// 预先生成静态密钥对（不计入基准测试时间）
+	alicePriv, _ := ccrypto.NewECKeySM2()
+	defer alicePriv.Free()
+	alicePriv.Generate()
+
+	bobPriv, _ := ccrypto.NewECKeySM2()
+	defer bobPriv.Free()
+	bobPriv.Generate()
+
+	alicePub, _ := ccrypto.NewECKeySM2()
+	defer alicePub.Free()
+	alicePub.SetPublicFrom(alicePriv)
+
+	bobPub, _ := ccrypto.NewECKeySM2()
+	defer bobPub.Free()
+	bobPub.SetPublicFrom(bobPriv)
+
+	aliceId := "alice12345"
+	bobId := "bob1234567"
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		// 1. Hello 消息交换
+		aliceHello := &helloMsg{
+			random:                       make([]byte, 32),
+			cipherSuites:                 []uint16{E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3},
+			supportedVersions:            []uint16{VersionE2E1},
+			supportedCurves:              []CurveID{SM2CurveP256V1},
+			supportedSignatureAlgorithms: []SignatureScheme{SM2WithSM3},
+		}
+		rand.Read(aliceHello.random)
+
+		bobHello := &helloMsg{
+			random:                       make([]byte, 32),
+			cipherSuites:                 []uint16{E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3},
+			supportedVersions:            []uint16{VersionE2E1},
+			supportedCurves:              []CurveID{SM2CurveP256V1},
+			supportedSignatureAlgorithms: []SignatureScheme{SM2WithSM3},
+		}
+		rand.Read(bobHello.random)
+
+		aliceHelloData, _ := aliceHello.marshal()
+		bobHelloData, _ := bobHello.marshal()
+
+		// 2. SM2 密钥协商
+		ctxAlice := sm2keyexch.NewKAPCtx()
+		ctxBob := sm2keyexch.NewKAPCtx()
+
+		ctxAlice.Init(alicePriv, aliceId, bobPub, bobId, aliceId > bobId, true)
+		ctxBob.Init(bobPriv, bobId, alicePub, aliceId, bobId > aliceId, true)
+
+		RA, _ := ctxAlice.Prepare()
+		RB, _ := ctxBob.Prepare()
+
+		aliceKey, _, _ := ctxAlice.ComputeKey(RB, 32)
+		bobKey, _, _ := ctxBob.ComputeKey(RA, 32)
+
+		ctxAlice.Cleanup()
+		ctxBob.Cleanup()
+
+		// 3. Master secret 和会话密钥派生
+		suite := cipherSuiteByID(E2E_SM2KEYAGREEMENT_WITH_SM4_128_GCM_SM3)
+		masterSecret := masterFromPreMasterSecret(VersionE2E1, suite, aliceKey, aliceHello.random, bobHello.random)
+
+		keysFromMasterSecret(VersionE2E1, suite, masterSecret, aliceHello.random, bobHello.random,
+			suite.macLen, suite.keyLen, suite.ivLen)
+
+		// 4. Finished 消息计算
+		fhAlice := newFinishedHash(suite, aliceId, bobId)
+		fhAlice.Write(aliceHelloData)
+		fhAlice.Write(bobHelloData)
+		fhAlice.localSum(masterSecret)
+
+		fhBob := newFinishedHash(suite, bobId, aliceId)
+		fhBob.Write(aliceHelloData)
+		fhBob.Write(bobHelloData)
+		fhBob.localSum(masterSecret)
+
+		_ = bobKey
+	}
 }
