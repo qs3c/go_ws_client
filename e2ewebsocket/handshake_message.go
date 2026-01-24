@@ -49,6 +49,18 @@ func (m *helloMsg) marshal() ([]byte, error) {
 		})
 	}
 
+	// 扩展3 supportedSignatureAlgorithms
+	if len(m.supportedSignatureAlgorithms) > 0 {
+		exts.AddUint16(extensionSignatureAlgorithms)
+		exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
+			exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
+				for _, sigAlg := range m.supportedSignatureAlgorithms {
+					exts.AddUint16(uint16(sigAlg))
+				}
+			})
+		})
+	}
+
 	extBytes, err := exts.Bytes()
 	if err != nil {
 		return nil, err
@@ -173,6 +185,19 @@ func (m *helloMsg) unmarshal(data []byte) bool {
 					return false
 				}
 				m.supportedVersions = append(m.supportedVersions, vers)
+			}
+		case extensionSignatureAlgorithms:
+			// RFC 8446, Section 4.2.3
+			var sigAlgs cryptobyte.String
+			if !extData.ReadUint16LengthPrefixed(&sigAlgs) || sigAlgs.Empty() {
+				return false
+			}
+			for !sigAlgs.Empty() {
+				var sigAlg uint16
+				if !sigAlgs.ReadUint16(&sigAlg) {
+					return false
+				}
+				m.supportedSignatureAlgorithms = append(m.supportedSignatureAlgorithms, SignatureScheme(sigAlg))
 			}
 		default:
 			// Ignore unknown extensions.

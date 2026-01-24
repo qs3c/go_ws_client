@@ -309,23 +309,25 @@ func TestCryptoTools_SM4_AEAD(t *testing.T) {
 	aad := []byte("Additional Auth Data")
 
 	// 1. Create AEAD
-	// Note: The current implementation of NewSm4AEADCipher binds the IV at creation time.
-	// This returns a cipher.AEAD that can do both Seal and Open.
-	aead := sm4tongsuo.NewSm4AEADCipher(key, iv)
+	// Note: The implementation uses the nonce parameter passed to Seal/Open.
+	// The fixedNonce passed to NewSm4AEADCipher is stored but the actual nonce
+	// used for each operation comes from the Seal/Open call.
+	aead := sm4tongsuo.NewSm4AEADCipher(key, nil)
 	if aead == nil {
 		t.Fatal("NewSm4AEADCipher failed")
 	}
 
 	// 2. Encryption
-	// nonce is handled internally via iv passed to New, so we pass nil here
-	ciphertext := aead.Seal(nil, nil, plaintext, aad)
+	// Pass the iv as nonce to Seal - each call should use a unique nonce
+	ciphertext := aead.Seal(nil, iv, plaintext, aad)
 	if len(ciphertext) == 0 {
 		t.Fatal("Encryption failed, empty ciphertext")
 	}
 	t.Logf("Ciphertext len: %d", len(ciphertext))
 
 	// 3. Decryption
-	decrypted, err := aead.Open(nil, nil, ciphertext, aad)
+	// Use the same nonce for decryption
+	decrypted, err := aead.Open(nil, iv, ciphertext, aad)
 	if err != nil {
 		t.Fatalf("Decryption failed: %v", err)
 	}
