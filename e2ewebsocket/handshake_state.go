@@ -198,10 +198,20 @@ func (hs *handshakeState) handshake() error {
 
 	hs.finishedHash = newFinishedHash(hs.suite, hs.localId, hs.remoteId)
 
-	if err := transcriptMsg(hs.helloMsg, &hs.finishedHash); err != nil {
+	// Ensure deterministic transcript order: ClientHello -> ServerHello
+	var clientHello, serverHello *helloMsg
+	if hs.localId < hs.remoteId {
+		clientHello = hs.helloMsg
+		serverHello = hs.remoteHelloMsg
+	} else {
+		clientHello = hs.remoteHelloMsg
+		serverHello = hs.helloMsg
+	}
+
+	if err := transcriptMsg(clientHello, &hs.finishedHash); err != nil {
 		return err
 	}
-	if err := transcriptMsg(hs.remoteHelloMsg, &hs.finishedHash); err != nil {
+	if err := transcriptMsg(serverHello, &hs.finishedHash); err != nil {
 		return err
 	}
 
@@ -211,21 +221,21 @@ func (hs *handshakeState) handshake() error {
 	if err := hs.establishKeys(); err != nil {
 		return err
 	}
-	if err := hs.sendFinished(s.localFinished[:]); err != nil {
-		return err
-	}
-
-	// if _, err := c.flush(); err != nil {
-	// 	return err
-	// }
-
-	// c.clientFinishedIsFirst = true
-	// if err := hs.readSessionTicket(); err != nil {
-	// 	return err
-	// }
-
-	if err := hs.readFinished(s.remoteFinished[:]); err != nil {
-		return err
+	isClient := hs.localId < hs.remoteId
+	if isClient {
+		if err := hs.sendFinished(s.localFinished[:]); err != nil {
+			return err
+		}
+		if err := hs.readFinished(s.remoteFinished[:]); err != nil {
+			return err
+		}
+	} else {
+		if err := hs.readFinished(s.remoteFinished[:]); err != nil {
+			return err
+		}
+		if err := hs.sendFinished(s.localFinished[:]); err != nil {
+			return err
+		}
 	}
 
 	s.isHandshakeComplete.Store(true)

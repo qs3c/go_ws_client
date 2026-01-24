@@ -56,6 +56,8 @@ func NewSession(id SessionID, remoteId string, conn *Conn) *Session {
 		conn:          conn,
 		handshakeChan: make(chan sessionMsg, 16),
 	}
+	s.in.cond = sync.NewCond(&s.in)
+	s.out.cond = sync.NewCond(&s.out)
 	s.handshakeFn = s.symHandshake
 	return &s
 }
@@ -342,6 +344,7 @@ type halfConn struct {
 
 	nextCipher any       // next encryption state
 	nextMac    hash.Hash // next MAC algorithm
+	cond       *sync.Cond
 }
 
 func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
@@ -523,11 +526,24 @@ func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash)
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
+	if hc.cond != nil {
+		hc.cond.Broadcast()
+	}
 }
 
 func (hc *halfConn) changeCipherSpec() error {
 	hc.Lock()
 	defer hc.Unlock()
+	for hc.nextCipher == nil && hc.err == nil {
+		if hc.cond != nil {
+			hc.cond.Wait()
+		} else {
+			break
+		}
+	}
+	if hc.err != nil {
+		return hc.err
+	}
 	if hc.nextCipher == nil {
 		return errors.New("alertInternalError")
 	}
@@ -601,6 +617,9 @@ func (hc *halfConn) setErrorLocked(err error) error {
 		hc.err = &permanentError{err: e}
 	} else {
 		hc.err = err
+	}
+	if hc.cond != nil {
+		hc.cond.Broadcast()
 	}
 	return hc.err
 }

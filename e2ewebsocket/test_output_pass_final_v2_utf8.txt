@@ -1,0 +1,19 @@
+﻿=== RUN   TestE2E_Concurrent
+2026/01/23 20:35:32 SM2 KeyAgreement Success: local=alice remote=bob secret=329e5b7106358f8432a9323866b324404d692453932f633b98494220b734e9b42ca16d6619e505fec22af543af9ce530
+sendFinished: calculated verifyData: 6d1b1b47a6bbf6ebbfd51010
+2026/01/23 20:35:32 readLoop changeCipherSpec error: alertInternalError
+2026/01/23 20:35:32 readLoop exited
+2026/01/23 20:35:32 SM2 KeyAgreement Success: local=bob remote=alice secret=329e5b7106358f8432a9323866b324404d692453932f633b98494220b734e9b42ca16d6619e505fec22af543af9ce530
+sendFinished: calculated verifyData: 4ad2d0ad46c94f54fda6dcd1
+2026/01/23 20:35:32 Passive handshake failed for session alice_bob: handshake channel closed
+readFinished: verify mismatch!
+expected: 0a876ebd17ccba8c5a295d83
+received: 4ad2d0ad46c94f54fda6dcd1
+    e2e_test.go:260: Alice write failed: alertHandshakeFailure
+2026/01/23 20:35:32 readLoop ReadMessage error: read tcp 127.0.0.1:54746->127.0.0.1:54745: use of closed network connection
+2026/01/23 20:35:32 readLoop exited
+    e2e_test.go:315: Alice ReadMessage error: read tcp 127.0.0.1:54746->127.0.0.1:54745: use of closed network connection
+--- FAIL: TestE2E_Concurrent (0.06s)
+FAIL
+FAIL	github.com/albert/ws_client/e2ewebsocket	1.795s
+FAIL
