@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test:*)",
+      "Bash(go mod tidy:*)",
+      "Bash(set PATH=%PATH%)",
+      "Bash(D:go_ws_client)",
+      "Bash(PATH=\"$PATH:D:/go_ws_client\" go test:*)",
+      "Bash(go build:*)"
+    ]
+  }
+}
