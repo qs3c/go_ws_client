@@ -20,8 +20,11 @@ Build (per platform)
 The scripts below follow the README build steps:
 - Linux:  ./scripts/build_tongsuo_linux.sh
 - macOS:  ./scripts/build_tongsuo_macos.sh
-- Windows (Developer Command Prompt):
+- Windows:
   .\scripts\build_tongsuo_windows.ps1
+
+On Windows, the script will try to locate VsDevCmd.bat and re-run itself inside a
+Developer Command Prompt if needed.
 
 Scripts build in a separate directory (third_party/tongsuo-build) and install into
 third_party/tongsuo by default to match the cgo paths.
