@@ -1,10 +1,9 @@
 package sm2keyexch
 
-// sm2 密钥交换依赖的是安装好的E盘的 8.3 铜锁库
 
 /*
-#cgo CFLAGS: -IE:/Tongsuo-8.3-stable/include -DOPENSSL_API_COMPAT=0x10100000L
-#cgo LDFLAGS: -LE:/Tongsuo-8.3-stable -lkeyexchange -lcrypto -lssl
+#cgo CFLAGS: -I${SRCDIR}/../../third_party/tongsuo-install/include -I${SRCDIR}/../../third_party/tongsuo/include -DOPENSSL_API_COMPAT=0x10100000L
+#cgo LDFLAGS: -L${SRCDIR} -L${SRCDIR}/../../third_party/tongsuo-install -L${SRCDIR}/../../third_party/tongsuo-install/lib -lkeyexchange -lcrypto -lssl
 #include "keyexchange.h"
 #include <openssl/ec.h>
 #include <openssl/x509.h>
