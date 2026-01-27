@@ -1,8 +1,8 @@
 package sm2tongsuo
 
 /*
-#cgo CFLAGS: -IE:/Tongsuo-8.3-stable/include -DOPENSSL_API_COMPAT=0x10100000L
-#cgo LDFLAGS: -LE:/Tongsuo-8.3-stable -lcrypto -lssl
+#cgo CFLAGS: -DOPENSSL_API_COMPAT=0x10100000L
+#cgo LDFLAGS: -lcrypto -lssl
 #include "../shim.h"
 */
 import "C"
