@@ -42,11 +42,18 @@ README notes
 
 Runtime
 
-Windows: add the DLL directory to PATH using:
+Windows (PowerShell):
   .\scripts\set_tongsuo_env.ps1
 
-Linux: set LD_LIBRARY_PATH to include third_party/tongsuo or third_party/tongsuo/lib
-macOS: set DYLD_LIBRARY_PATH to include third_party/tongsuo or third_party/tongsuo/lib
+Linux/macOS (bash, must be sourced to affect current shell):
+  source ./scripts/set_tongsuo_env.sh
+
+Per-OS runtime helpers:
+- Linux:  scripts/set_tongsuo_env_linux.sh
+- macOS:  scripts/set_tongsuo_env_macos.sh
+
+Linux: sets LD_LIBRARY_PATH to include third_party/tongsuo or third_party/tongsuo/lib
+macOS: sets DYLD_LIBRARY_PATH to include third_party/tongsuo or third_party/tongsuo/lib
 
 Notes
 - Windows/amd64 binaries do not work on Linux/macOS or ARM.

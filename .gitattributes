@@ -5,3 +5,4 @@ auto eol=lf
 .gitmodules text eol=lf
 *.ps1 text eol=lf
 *.md text eol=lf
+*.sh text eol=lf
