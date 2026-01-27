@@ -19,23 +19,19 @@ func TestCryptoTools_SM2_KeyExchange(t *testing.T) {
 
 	local, err := ccrypto.NewECKeySM2()
 	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (local key): %v", err)
 	}
 	remote, err := ccrypto.NewECKeySM2()
 	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (remote key): %v", err)
 	}
 	localPub, err := ccrypto.NewECKeySM2()
 	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (local pub key): %v", err)
 	}
 	remotePub, err := ccrypto.NewECKeySM2()
 	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (remote pub key): %v", err)
 	}
 
 	defer local.Free()
@@ -44,21 +40,17 @@ func TestCryptoTools_SM2_KeyExchange(t *testing.T) {
 	defer remotePub.Free()
 
 	if err = local.Generate(); err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (local generate): %v", err)
 	}
 	if err = remote.Generate(); err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (remote generate): %v", err)
 	}
 
 	if err = localPub.SetPublicFrom(local); err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (local set public): %v", err)
 	}
 	if err = remotePub.SetPublicFrom(remote); err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (remote set public): %v", err)
 	}
 
 	ctxLocal := sm2keyexch.NewKAPCtx()
@@ -67,53 +59,43 @@ func TestCryptoTools_SM2_KeyExchange(t *testing.T) {
 	defer ctxRemote.Cleanup()
 
 	if err = ctxLocal.Init(local, "123456", remotePub, "654321", true, true); err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (local init): %v", err)
 	}
 	if err = ctxRemote.Init(remote, "654321", localPub, "123456", false, true); err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (remote init): %v", err)
 	}
 
 	RA, err := ctxLocal.Prepare()
 	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (local prepare): %v", err)
 	}
 	RB, err := ctxRemote.Prepare()
 	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (remote prepare): %v", err)
 	}
 
 	keyLocal, csLocal, err := ctxLocal.ComputeKey(RB, 32)
 	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (local compute key): %v", err)
 	}
 	keyRemote, csRemote, err := ctxRemote.ComputeKey(RA, 32)
 	if err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (remote compute key): %v", err)
 	}
 
 	if err = ctxLocal.FinalCheck(csRemote); err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (local final check): %v", err)
 	}
 	if err = ctxRemote.FinalCheck(csLocal); err != nil {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (remote final check): %v", err)
 	}
 
 	if len(keyLocal) != len(keyRemote) {
-		fmt.Println("SM2 KAP failed")
-		return
+		t.Fatalf("SM2 KAP failed (key length mismatch): %d vs %d", len(keyLocal), len(keyRemote))
 	}
 	for i := range keyLocal {
 		if keyLocal[i] != keyRemote[i] {
-			fmt.Println("SM2 KAP failed")
-			return
+			t.Fatalf("SM2 KAP failed (key mismatch at %d)", i)
 		}
 	}
 
