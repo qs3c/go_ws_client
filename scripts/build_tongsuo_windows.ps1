@@ -3,13 +3,29 @@
 # locate VsDevCmd.bat and re-run itself inside it.
 [CmdletBinding()]
 param(
-  [string]$SourceDir = (Join-Path (Split-Path -Parent $PSScriptRoot) "third_party\tongsuo"),
-  [string]$BuildDir = (Join-Path (Split-Path -Parent $PSScriptRoot) "third_party\tongsuo-build"),
+  [string]$SourceDir,
+  [string]$BuildDir,
   [string]$Prefix = $env:TONGSUO_PREFIX,
   [string]$ConfigOpts = $env:TONGSUO_CONFIG_OPTS,
   [string]$InstallTargets = $env:TONGSUO_INSTALL_TARGETS,
   [switch]$NoBootstrap
 )
+
+$scriptDir = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptDir)) {
+  if ($MyInvocation.MyCommand.Path) {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+  } else {
+    $scriptDir = (Get-Location).Path
+  }
+}
+
+if ([string]::IsNullOrWhiteSpace($SourceDir)) {
+  $SourceDir = Join-Path $scriptDir "third_party\tongsuo"
+}
+if ([string]::IsNullOrWhiteSpace($BuildDir)) {
+  $BuildDir = Join-Path $scriptDir "third_party\tongsuo-build"
+}
 
 function Test-DevEnv {
   $hasNmake = Get-Command nmake -ErrorAction SilentlyContinue
