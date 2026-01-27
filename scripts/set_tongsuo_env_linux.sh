@@ -7,7 +7,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TONGSUO_HOME="${TONGSUO_HOME:-$ROOT/third_party/tongsuo}"
+TONGSUO_HOME="${TONGSUO_HOME:-$ROOT/third_party/tongsuo-install}"
 
 if [[ ! -d "$TONGSUO_HOME" ]]; then
   echo "Tongsuo not found at $TONGSUO_HOME. Run: git submodule update --init --recursive" >&2

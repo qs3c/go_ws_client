@@ -2,8 +2,8 @@ package sm2keyexch
 
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../third_party/tongsuo/include -DOPENSSL_API_COMPAT=0x10100000L
-#cgo LDFLAGS: -L${SRCDIR}/../../third_party/tongsuo -L${SRCDIR}/../../third_party/tongsuo/lib -lkeyexchange -lcrypto -lssl
+#cgo CFLAGS: -I${SRCDIR}/../../third_party/tongsuo-install/include -I${SRCDIR}/../../third_party/tongsuo/include -DOPENSSL_API_COMPAT=0x10100000L
+#cgo LDFLAGS: -L${SRCDIR}/../../third_party/tongsuo-install -L${SRCDIR}/../../third_party/tongsuo-install/lib -lkeyexchange -lcrypto -lssl
 #include "keyexchange.h"
 #include <openssl/ec.h>
 #include <openssl/x509.h>

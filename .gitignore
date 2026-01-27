@@ -1,0 +1,4 @@
+# Tongsuo local build artifacts
+/third_party/tongsuo-build/
+/third_party/tongsuo-build*/
+/third_party/tongsuo-install/

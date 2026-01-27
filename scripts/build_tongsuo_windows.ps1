@@ -30,6 +30,9 @@ if ([string]::IsNullOrWhiteSpace($SourceDir)) {
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
   $BuildDir = Join-Path $repoRoot "third_party\tongsuo-build"
 }
+if ([string]::IsNullOrWhiteSpace($Prefix)) {
+  $Prefix = Join-Path $repoRoot "third_party\tongsuo-install"
+}
 
 function Test-DevEnv {
   $hasNmake = Get-Command nmake -ErrorAction SilentlyContinue
@@ -101,7 +104,6 @@ function Invoke-InDevCmd {
   exit $LASTEXITCODE
 }
 
-if ([string]::IsNullOrWhiteSpace($Prefix)) { $Prefix = $SourceDir }
 if ([string]::IsNullOrWhiteSpace($ConfigOpts)) { $ConfigOpts = "enable-ntls" }
 if ([string]::IsNullOrWhiteSpace($InstallTargets)) { $InstallTargets = "install" }
 if ([string]::IsNullOrWhiteSpace($Target)) { $Target = "VC-WIN64A" }
@@ -109,6 +111,13 @@ if ([string]::IsNullOrWhiteSpace($OpenSSLDir)) { $OpenSSLDir = (Join-Path $Prefi
 
 if (-not (Test-Path -LiteralPath $SourceDir)) {
   Write-Error "Tongsuo source not found at $SourceDir. Run: git submodule update --init --recursive"
+  exit 1
+}
+
+$srcFull = [System.IO.Path]::GetFullPath($SourceDir)
+$prefixFull = [System.IO.Path]::GetFullPath($Prefix)
+if ($srcFull -ieq $prefixFull) {
+  Write-Error "Refusing to install into source directory. Set TONGSUO_PREFIX to a separate install path."
   exit 1
 }
 

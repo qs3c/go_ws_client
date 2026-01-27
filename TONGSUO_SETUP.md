@@ -1,11 +1,11 @@
 # Tongsuo setup (cgo)
 
-This project uses Tongsuo via cgo. The cgo include/library paths are set to:
-  third_party/tongsuo
+This project uses Tongsuo via cgo. The cgo include/library paths point to:
+  third_party/tongsuo-install
 
-Submodule
+Submodule (source)
 
-Tongsuo is tracked as a git submodule (8.3-stable). Initialize it with:
+Tongsuo source is tracked as a git submodule (8.3-stable):
   git submodule update --init --recursive
 
 Build prerequisites (from Tongsuo README)
@@ -17,7 +17,8 @@ Build prerequisites (from Tongsuo README)
 
 Build (per platform)
 
-The scripts below follow the README build steps:
+The scripts below follow the README build steps and install into
+third_party/tongsuo-install by default:
 - Linux:  ./scripts/build_tongsuo_linux.sh
 - macOS:  ./scripts/build_tongsuo_macos.sh
 - Windows:
@@ -26,12 +27,12 @@ The scripts below follow the README build steps:
 On Windows, the script will try to locate VsDevCmd.bat and re-run itself inside a
 Developer Command Prompt if needed.
 
-Scripts build in a separate directory (third_party/tongsuo-build) and install into
-third_party/tongsuo by default to match the cgo paths.
+Note: The scripts refuse to install into the source directory to avoid
+overwriting headers.
 
 Optional build knobs (env vars)
 
-- TONGSUO_PREFIX: install prefix (default: third_party/tongsuo)
+- TONGSUO_PREFIX: install prefix (default: third_party/tongsuo-install)
 - TONGSUO_BUILD_DIR: build directory (default: third_party/tongsuo-build)
 - TONGSUO_CONFIG_OPTS: extra Configure options (e.g. enable-ntls, no-rsa)
 - TONGSUO_INSTALL_TARGETS: make install targets (default: install)
@@ -57,8 +58,8 @@ Per-OS runtime helpers:
 - Linux:  scripts/set_tongsuo_env_linux.sh
 - macOS:  scripts/set_tongsuo_env_macos.sh
 
-Linux: sets LD_LIBRARY_PATH to include third_party/tongsuo or third_party/tongsuo/lib
-macOS: sets DYLD_LIBRARY_PATH to include third_party/tongsuo or third_party/tongsuo/lib
+Linux: sets LD_LIBRARY_PATH to include third_party/tongsuo-install/lib
+macOS: sets DYLD_LIBRARY_PATH to include third_party/tongsuo-install/lib
 
 Notes
 - Windows/amd64 binaries do not work on Linux/macOS or ARM.
