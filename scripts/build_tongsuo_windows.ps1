@@ -19,12 +19,14 @@ if ([string]::IsNullOrWhiteSpace($scriptDir)) {
     $scriptDir = (Get-Location).Path
   }
 }
+$repoRoot = Split-Path -Parent $scriptDir
+if ([string]::IsNullOrWhiteSpace($repoRoot)) { $repoRoot = $scriptDir }
 
 if ([string]::IsNullOrWhiteSpace($SourceDir)) {
-  $SourceDir = Join-Path $scriptDir "third_party\tongsuo"
+  $SourceDir = Join-Path $repoRoot "third_party\tongsuo"
 }
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
-  $BuildDir = Join-Path $scriptDir "third_party\tongsuo-build"
+  $BuildDir = Join-Path $repoRoot "third_party\tongsuo-build"
 }
 
 function Test-DevEnv {
