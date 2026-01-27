@@ -8,6 +8,7 @@ param(
   [string]$Prefix = $env:TONGSUO_PREFIX,
   [string]$ConfigOpts = $env:TONGSUO_CONFIG_OPTS,
   [string]$InstallTargets = $env:TONGSUO_INSTALL_TARGETS,
+  [string]$Target = $env:TONGSUO_TARGET,
   [switch]$NoBootstrap
 )
 
@@ -88,6 +89,7 @@ function Invoke-InDevCmd {
     "-Prefix", "`"$Prefix`"",
     "-ConfigOpts", "`"$ConfigOpts`"",
     "-InstallTargets", "`"$InstallTargets`"",
+    "-Target", "`"$Target`"",
     "-NoBootstrap"
   )
   $argString = $args -join ' '
@@ -100,6 +102,7 @@ function Invoke-InDevCmd {
 if ([string]::IsNullOrWhiteSpace($Prefix)) { $Prefix = $SourceDir }
 if ([string]::IsNullOrWhiteSpace($ConfigOpts)) { $ConfigOpts = "enable-ntls" }
 if ([string]::IsNullOrWhiteSpace($InstallTargets)) { $InstallTargets = "install" }
+if ([string]::IsNullOrWhiteSpace($Target)) { $Target = "VC-WIN64A" }
 
 if (-not (Test-Path -LiteralPath $SourceDir)) {
   Write-Error "Tongsuo source not found at $SourceDir. Run: git submodule update --init --recursive"
@@ -131,7 +134,13 @@ if (-not (Test-Path -LiteralPath $BuildDir)) {
 Push-Location $BuildDir
 try {
   $cfgArgs = @()
-  $cfgArgs += ($ConfigOpts -split '\s+' | Where-Object { $_ -ne "" })
+  $cfgTokens = ($ConfigOpts -split '\s+' | Where-Object { $_ -ne "" })
+  $hasTarget = $false
+  foreach ($t in $cfgTokens) {
+    if ($t -match '^(VC-|mingw|mingw64)$') { $hasTarget = $true; break }
+  }
+  if (-not $hasTarget) { $cfgArgs += $Target }
+  $cfgArgs += $cfgTokens
   $cfgArgs += "--prefix=$Prefix"
 
   & perl (Join-Path $SourceDir "Configure") @cfgArgs

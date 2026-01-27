@@ -34,11 +34,11 @@ Optional build knobs (env vars)
 - TONGSUO_PREFIX: install prefix (default: third_party/tongsuo)
 - TONGSUO_BUILD_DIR: build directory (default: third_party/tongsuo-build)
 - TONGSUO_CONFIG_OPTS: extra Configure options (e.g. enable-ntls, no-rsa)
-- TONGSUO_INSTALL_TARGETS: make install targets (default: install)
+- TONGSUO_INSTALL_TARGETS: make install targets (default: install)`n- TONGSUO_TARGET: Windows Configure target (default: VC-WIN64A)
 
 README notes
 
-- Windows build uses: perl Configure enable-ntls; nmake; nmake install
+- Windows build uses: perl Configure enable-ntls; nmake; nmake install (script adds VC-WIN64A by default unless a target is provided)
 - You can run tests with: make test
 - Install variants: make install_runtime_libs, make install_dev, make install_programs
 - Configure options use enable-xxx / no-xxx
