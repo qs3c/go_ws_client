@@ -9,6 +9,7 @@ param(
   [string]$ConfigOpts = $env:TONGSUO_CONFIG_OPTS,
   [string]$InstallTargets = $env:TONGSUO_INSTALL_TARGETS,
   [string]$Target = $env:TONGSUO_TARGET,
+  [string]$OpenSSLDir = $env:TONGSUO_OPENSSLDIR,
   [switch]$NoBootstrap
 )
 
@@ -90,6 +91,7 @@ function Invoke-InDevCmd {
     "-ConfigOpts", "`"$ConfigOpts`"",
     "-InstallTargets", "`"$InstallTargets`"",
     "-Target", "`"$Target`"",
+    "-OpenSSLDir", "`"$OpenSSLDir`"",
     "-NoBootstrap"
   )
   $argString = $args -join ' '
@@ -103,6 +105,7 @@ if ([string]::IsNullOrWhiteSpace($Prefix)) { $Prefix = $SourceDir }
 if ([string]::IsNullOrWhiteSpace($ConfigOpts)) { $ConfigOpts = "enable-ntls" }
 if ([string]::IsNullOrWhiteSpace($InstallTargets)) { $InstallTargets = "install" }
 if ([string]::IsNullOrWhiteSpace($Target)) { $Target = "VC-WIN64A" }
+if ([string]::IsNullOrWhiteSpace($OpenSSLDir)) { $OpenSSLDir = (Join-Path $Prefix "ssl") }
 
 if (-not (Test-Path -LiteralPath $SourceDir)) {
   Write-Error "Tongsuo source not found at $SourceDir. Run: git submodule update --init --recursive"
@@ -136,11 +139,14 @@ try {
   $cfgArgs = @()
   $cfgTokens = ($ConfigOpts -split '\s+' | Where-Object { $_ -ne "" })
   $hasTarget = $false
+  $hasOpenSSLDir = $false
   foreach ($t in $cfgTokens) {
-    if ($t -match '^(VC-|mingw|mingw64)$') { $hasTarget = $true; break }
+    if ($t -match '^(VC-|mingw|mingw64)$') { $hasTarget = $true }
+    if ($t -match '^--openssldir=') { $hasOpenSSLDir = $true }
   }
   if (-not $hasTarget) { $cfgArgs += $Target }
   $cfgArgs += $cfgTokens
+  if (-not $hasOpenSSLDir) { $cfgArgs += "--openssldir=$OpenSSLDir" }
   $cfgArgs += "--prefix=$Prefix"
 
   & perl (Join-Path $SourceDir "Configure") @cfgArgs

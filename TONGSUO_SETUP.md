@@ -34,7 +34,7 @@ Optional build knobs (env vars)
 - TONGSUO_PREFIX: install prefix (default: third_party/tongsuo)
 - TONGSUO_BUILD_DIR: build directory (default: third_party/tongsuo-build)
 - TONGSUO_CONFIG_OPTS: extra Configure options (e.g. enable-ntls, no-rsa)
-- TONGSUO_INSTALL_TARGETS: make install targets (default: install)`n- TONGSUO_TARGET: Windows Configure target (default: VC-WIN64A)
+- TONGSUO_INSTALL_TARGETS: make install targets (default: install)`n- TONGSUO_TARGET: Windows Configure target (default: VC-WIN64A)`n- TONGSUO_OPENSSLDIR: OpenSSL dir (default: <prefix>\\ssl)
 
 README notes
 
