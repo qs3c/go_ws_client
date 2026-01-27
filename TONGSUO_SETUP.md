@@ -1,26 +1,31 @@
 # Tongsuo setup (cgo)
 
-This project uses Tongsuo via cgo. You need the Tongsuo headers and libraries installed on each machine.
+This project uses Tongsuo via cgo. The cgo include/library paths are set to:
+  third_party/tongsuo
 
-Recommended portable setup
+Submodule
 
-1) Install/build Tongsuo and note its install prefix.
-2) Set environment variables for the build:
-   - CGO_CFLAGS:  -I<TOGSUO_PREFIX>/include -DOPENSSL_API_COMPAT=0x10100000L
-   - CGO_LDFLAGS: -L<TOGSUO_PREFIX> -lkeyexchange -lcrypto -lssl
+Tongsuo is tracked as a git submodule on the 8.3-stable branch. Initialize it with:
+  git submodule update --init --recursive
 
-If your OS needs a runtime library path:
-- Windows: add <TONGSUO_PREFIX> to PATH so the DLLs are found.
-- Linux: set LD_LIBRARY_PATH or install to a system lib dir.
-- macOS: set DYLD_LIBRARY_PATH or install to a system lib dir.
+Note: submodules are checked out at a specific commit (detached HEAD). That is fine for builds.
+If you want to update to the latest 8.3-stable commit, run:
+  git submodule update --remote --depth 1
 
-Example (PowerShell)
+Build (per platform)
 
-  $env:TONGSUO_HOME = "D:\\Tongsuo-8.3-stable"
-  $env:CGO_CFLAGS   = "-I$env:TONGSUO_HOME/include -DOPENSSL_API_COMPAT=0x10100000L"
-  $env:CGO_LDFLAGS  = "-L$env:TONGSUO_HOME -lkeyexchange -lcrypto -lssl"
-  $env:PATH         = "$env:TONGSUO_HOME;$env:PATH"
+Tongsuo is platform- and arch-specific. For each target platform, build inside:
+  third_party/tongsuo
+
+After building, ensure:
+- Headers are in third_party/tongsuo/include
+- Libraries are in third_party/tongsuo/ or third_party/tongsuo/lib
+
+Runtime (Windows)
+
+Run the helper script to add the DLL directory to PATH:
+  .\scripts\set_tongsuo_env.ps1
 
 Notes
-- If Tongsuo is installed in a system include/lib path, you can omit CGO_CFLAGS/CGO_LDFLAGS.
+- Windows/amd64 binaries do not work on Linux/macOS or ARM.
 - If you do not use the SM2 key exchange features, -lkeyexchange may be omitted.

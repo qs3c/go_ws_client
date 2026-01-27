@@ -1,8 +1,8 @@
 package crypto
 
 /*
-#cgo CFLAGS: -DOPENSSL_API_COMPAT=0x10100000L
-#cgo LDFLAGS: -lkeyexchange -lcrypto -lssl
+#cgo CFLAGS: -I${SRCDIR}/../third_party/tongsuo/include -DOPENSSL_API_COMPAT=0x10100000L
+#cgo LDFLAGS: -L${SRCDIR}/../third_party/tongsuo -L${SRCDIR}/../third_party/tongsuo/lib -lkeyexchange -lcrypto -lssl
 #include "./sm2keyexch/keyexchange.h"
 #include <openssl/ec.h>
 #include <openssl/x509.h>

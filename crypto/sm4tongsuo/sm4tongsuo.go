@@ -1,8 +1,8 @@
 package sm4tongsuo
 
 /*
-#cgo CFLAGS: -DOPENSSL_API_COMPAT=0x10100000L
-#cgo LDFLAGS: -lcrypto -lssl
+#cgo CFLAGS: -I${SRCDIR}/../../third_party/tongsuo/include -DOPENSSL_API_COMPAT=0x10100000L
+#cgo LDFLAGS: -L${SRCDIR}/../../third_party/tongsuo -L${SRCDIR}/../../third_party/tongsuo/lib -lcrypto -lssl
 #include "../myshim.h"
 */
 import "C"
