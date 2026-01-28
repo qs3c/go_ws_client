@@ -2,22 +2,19 @@ package e2ewebsocket
 
 import (
 	"context"
-	"crypto/cipher"
-	"errors"
-	"fmt"
 	"hash"
-	"io"
-	"net"
 	"sync"
 	"sync/atomic"
-
-	ccrypto "github.com/albert/ws_client/crypto"
 )
 
 type SessionID string
 
+type sessionMsg struct {
+	typ  recordType
+	data []byte
+	err  error
+}
 
-// Session: 负责单个逻辑会话的协商和加密
 type Session struct {
 	// 初始化时要填入的参数
 	id       SessionID
@@ -40,243 +37,36 @@ type Session struct {
 	remoteFinished      [12]byte
 
 	hand [][]byte
+
+	handshakeChan chan sessionMsg
 }
 
 func NewSession(id SessionID, remoteId string, conn *Conn) *Session {
 	s := Session{
-		id:       id,
-		remoteId: remoteId,
-		conn:     conn,
+		id:            id,
+		remoteId:      remoteId,
+		conn:          conn,
+		handshakeChan: make(chan sessionMsg, 16),
 	}
+	s.in.cond = sync.NewCond(&s.in)
+	s.out.cond = sync.NewCond(&s.out)
 	s.handshakeFn = s.symHandshake
 	return &s
 }
 
-func (s *Session) Handshake() error {
-	return s.HandshakeContext(context.Background())
-}
 
-func (s *Session) HandshakeContext(ctx context.Context) error {
-	return s.handshakeContext(ctx)
-}
 
-// 这些握手相关的，看起来应该挂到 Session 下而不是 Conn 下【Read Write 继续挂在 Conn 下】
-func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 
-	if s.isHandshakeComplete.Load() {
-		return nil
-	}
 
-	handshakeCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
-	// 正常通过 Handshake 函数调用的，ctx 是 background 上下文不具有取消/超时逻辑
-	// 不会有 ctx.Done() != nil 的情况
-	if ctx.Done() != nil {
 
-		done := make(chan struct{})
-		interruptRes := make(chan error, 1)
-		defer func() {
-			// 该函数正常执行完后，会从 interruptRes 中拿错误
-			// 如果之前 handshakeCtx 已经取消，拿到 handshakeCtx.Err() 错误
-			// 如果之前 handshakeCtx 没有取消，函数正常执行完毕，那么会拿到 nil
 
-			// [告诉中断器整个流程执行完毕]
-			close(done)
-			// [从中断器获取执行结果是正常执行了还是被打断了]
-			if ctxErr := <-interruptRes; ctxErr != nil {
-				// Return context error to user.
-				ret = ctxErr
-			}
-		}()
 
-		// 常见的是在主流程中for + select 监听ctx.Done()
-		// 通过 default 不断推进函数正常工作内容
-		// 这样上下文被取消的时候会及时打断主流程
 
-		// 这种方式不会打断 handshakeContext 函数的正常执行
-		// 但是提前 close 了 conn，执行过程中会出错
-		// 最终再把 error 替换成 ctx 取消错误，代表是主动取消了握手
 
-		// 开启一个 goroutine 中断器，监听 ctx.Done() 信号
-		// 当 ctx 被取消时，关闭连接并返回 ctx.Err() 错误
-		go func() {
-			select {
-			case <-handshakeCtx.Done():
-				// Close the connection, discarding the error
-				_ = s.conn.Close()
-				interruptRes <- handshakeCtx.Err()
-			case <-done:
-				interruptRes <- nil
-			}
-		}()
-	}
-	// 【第三大步：上锁与二次状态检查】
-	// 上锁并二次检查握手是否已经完成
-	s.handshakeMutex.Lock()
-	defer s.handshakeMutex.Unlock()
-
-	if err := s.handshakeErr; err != nil {
-		return err
-	}
-	if s.isHandshakeComplete.Load() {
-		return nil
-	}
-
-	// 给 c.in 加锁，确保在握手过程中不会被其他 goroutine 访问
-	// 握手过程涉及读写，加 in 锁是因为，read 和 write 上锁设计不同
-	// 小 write 函数内部细粒度上锁，但是小 read 函数的不会上锁，所以都是在外部先上锁
-	// 比如在这里进入握手状态机前，比如在大 Read 中上锁
-	// s.in.Lock()
-	// defer s.in.Unlock()
-	// 【第四大步：执行握手】
-	// 实际执行握手，返回 c.handshakeErr 握手错误
-	s.handshakeErr = s.handshakeFn(handshakeCtx)
-	if s.handshakeErr == nil {
-		// 增加握手计数器
-		s.handshakes++
-	}
-
-	// 握手没错但是标记未完成
-	if s.handshakeErr == nil && !s.isHandshakeComplete.Load() {
-		s.handshakeErr = errors.New("tls: internal error: handshake should have had a result")
-	}
-	// 握手有错但是标记完成
-	if s.handshakeErr != nil && s.isHandshakeComplete.Load() {
-		panic("tls: internal error: handshake returned an error but is marked successful")
-	}
-
-	return s.handshakeErr
-}
-
-// 读取握手数据方法在 session 上，读应用数据方法在 conn 上，源泵方法在 conn 上
-func (s *Session) readHandshake(transcript transcriptHash) (any, error) {
-
-	// 合理应该弄一个最高上限次数，或者说超时时间，不能一致循环在这里
-	// 其实感觉 readRecord 这个函数可能会有并发问题啊！是不是！
-	for len(s.hand) == 0 {
-		if err := s.conn.readRecord(); err != nil {
-			return nil, err
-		}
-	}
-
-	// 读取handshake数据
-	data := s.hand[0]
-	s.hand = s.hand[1:]
-
-	maxHandshakeSize := maxHandshake
-
-	// n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
-	if len(data) > maxHandshakeSize {
-		s.out.setErrorLocked(errors.New("alertInternalError"))
-		return nil, s.in.setErrorLocked(fmt.Errorf("tls: handshake message of length %d bytes exceeds maximum of %d bytes", len(data), maxHandshakeSize))
-	}
-
-	return s.unmarshalHandshakeMessage(data, transcript)
-}
-
-func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHash) (handshakeMessage, error) {
-	// [1字节类型|和消息内容]
-	// 无需长度
-	var m handshakeMessage
-	switch data[0] {
-	case typeHelloMsg:
-		m = new(helloMsg)
-	// todo  补充其他消息
-	default:
-		return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
-	}
-
-	// 因为这里的原 data 其实来自 hand 缓冲区，所以为了不破坏 hand 缓冲区
-	// 进行了一次非常地道的深拷贝
-	// data = append([]byte(nil), data...)
-
-	if !m.unmarshal(data) {
-		return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
-	}
-
-	if transcript != nil {
-		transcript.Write(data)
-	}
-
-	return m, nil
-}
-
-// 同理写握手数据、写CCS数据方法在 session 上，写应用数据方法在 session 上
-func (s *Session) writeHandshakeRecord(msg handshakeMessage, transcript transcriptHash) error {
-	// c.out.Lock()
-	// defer c.out.Unlock()
-
-	data, err := msg.marshal()
-	if err != nil {
-		return err
-	}
-	if transcript != nil {
-		transcript.Write(data)
-	}
-
-	// 不论是写入握手消息还是应用消息，writeRecordLocked 前上 out 锁
-	// writeRecordLocked 内部都会调用 out 加密
-	return s.conn.writeRecordLocked(recordTypeHandshake, data, s)
-}
-
-func (s *Session) writeChangeCipherRecord() error {
-	// c.out.Lock()
-	// defer c.out.Unlock()
-	err := s.conn.writeRecordLocked(recordTypeChangeCipherSpec, []byte{1}, s)
-	return err
-}
-
-//  涉及重协商的这两个功能先不做
-// func (s *Session) handlePostHandshakeMessage() error {
-
-// 	return s.handleRenegotiation()
-
-// }
-
-// func (s *Session) handleRenegotiation() error {
-
-// 	msg, err := s.conn.readHandshake(nil)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	helloReq, ok := msg.(*helloRequestMsg)
-// 	if !ok {
-// 		s.sendAlert(alertUnexpectedMessage)
-// 		return unexpectedMessageError(helloReq, msg)
-// 	}
-
-// 	if !s.conn.isClient {
-// 		return s.sendAlert(alertNoRenegotiation)
-// 	}
-
-// 	switch s.config.Renegotiation {
-// 	case RenegotiateNever:
-// 		return s.sendAlert(alertNoRenegotiation)
-// 	case RenegotiateOnceAsClient:
-// 		if s.handshakes > 1 {
-// 			return s.sendAlert(alertNoRenegotiation)
-// 		}
-// 	case RenegotiateFreelyAsClient:
-// 		// Ok.
-// 	default:
-// 		s.sendAlert(alertInternalError)
-// 		return errors.New("tls: unknown Renegotiation value")
-// 	}
-
-// 	s.handshakeMutex.Lock()
-// 	defer s.handshakeMutex.Unlock()
-
-// 	s.isHandshakeComplete.Store(false)
-// 	if s.handshakeErr = s.clientHandshake(context.Background()); s.handshakeErr == nil {
-// 		s.handshakes++
-// 	}
-// 	return s.handshakeErr
-// }
 
 type halfConn struct {
-	// sync.Mutex
+	sync.Mutex
 	err     error  // first permanent error
 	version uint16 // protocol version
 	cipher  any    // cipher algorithm
@@ -287,9 +77,14 @@ type halfConn struct {
 
 	nextCipher any       // next encryption state
 	nextMac    hash.Hash // next MAC algorithm
+	// ########### cond 很重要，对称握手特有的竞态问题
+	cond       *sync.Cond
 }
 
+
 func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
+	hc.Lock()
+	defer hc.Unlock()
 
 	// 我传进来的整个都是 payload 不是带 header 的 record
 	var plaintext []byte
@@ -311,6 +106,9 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 				return nil, errors.New("alertNonceZero")
 			}
 			payload = payload[explicitNonceLen:]
+			if len(payload) < c.Overhead() {
+				return nil, errors.New("alertBadRecordMAC")
+			}
 
 			// 构造 additionalData
 			var additionalData []byte
@@ -389,6 +187,8 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 }
 
 func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, error) {
+	hc.Lock()
+	defer hc.Unlock()
 	if hc.cipher == nil {
 		return append(record, payload...), nil
 	}
@@ -453,86 +253,4 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 	hc.incSeq()
 
 	return record, nil
-}
-
-func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash) {
-	hc.version = version
-	hc.nextCipher = cipher
-	hc.nextMac = mac
-}
-
-func (hc *halfConn) changeCipherSpec() error {
-	if hc.nextCipher == nil {
-		return errors.New("alertInternalError")
-	}
-	hc.cipher = hc.nextCipher
-	hc.mac = hc.nextMac
-	hc.nextCipher = nil
-	hc.nextMac = nil
-	// 将64位序列号seq重置为全0
-	// 这是TLS协议要求的，确保新的加密状态使用新的序列号计数
-	for i := range hc.seq {
-		hc.seq[i] = 0
-	}
-	return nil
-}
-
-// =======================================================
-func (hc *halfConn) explicitNonceLen() int {
-	if hc.cipher == nil {
-		return 0
-	}
-
-	// any 类型的 cipher可以是 cipher.Stream, aead, cbcMode 这三种 interface
-	// 其中 aead 是在 cipher.AEAD 基础上改的
-	// 这里的 cbcMode 是在 cipher.BlockMode 基础上改的
-	switch c := hc.cipher.(type) {
-	case cipher.Stream:
-		return 0
-	case ccrypto.AEAD:
-		return c.ExplicitNonceLen()
-	// case cbcMode:
-	// 	// TLS 1.1 introduced a per-record explicit IV to fix the BEAST attack.
-	// 	if hc.version >= VersionTLS11 {
-	// 		return c.BlockSize()
-	// 	}
-	// 	return 0
-	default:
-		panic("unknown cipher type")
-	}
-}
-
-func (hc *halfConn) incSeq() {
-	// 64位无符号序列号的安全递增操作
-	// 从最低位开始加1，如果不发生进位则直接结束
-	// 发生进位时，继续向高位递增，直到没有进位或到达最高位
-	for i := 7; i >= 0; i-- {
-		hc.seq[i]++
-		if hc.seq[i] != 0 {
-			return
-		}
-	}
-
-	// Not allowed to let sequence number wrap.
-	// Instead, must renegotiate before it does.
-	// Not likely enough to bother.
-	panic("TLS: sequence number wraparound")
-}
-
-type permanentError struct {
-	err net.Error
-}
-
-func (e *permanentError) Error() string   { return e.err.Error() }
-func (e *permanentError) Unwrap() error   { return e.err }
-func (e *permanentError) Timeout() bool   { return e.err.Timeout() }
-func (e *permanentError) Temporary() bool { return false }
-
-func (hc *halfConn) setErrorLocked(err error) error {
-	if e, ok := err.(net.Error); ok {
-		hc.err = &permanentError{err: e}
-	} else {
-		hc.err = err
-	}
-	return hc.err
 }

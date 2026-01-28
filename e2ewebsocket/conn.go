@@ -1,375 +1,196 @@
 package e2ewebsocket
 
 import (
+	"bytes"
 	"errors"
 	"log"
-	"net/http"
-	"time"
+	"sync"
 
-	"github.com/albert/ws_client/compressor"
-	"github.com/albert/ws_client/encoder"
 	"github.com/gorilla/websocket"
-	"github.com/openimsdk/protocol/sdkws"
-	"google.golang.org/protobuf/proto"
 )
 
 type Conn struct {
-	// 初始化需要提供的字段
-	conn   *websocket.Conn
+	conn *websocket.Conn
 	hostId string
 	config *Config
-
-	sessions map[SessionID]*Session
-
-	// 握手状态相关
-	// vers                uint16
-	// cipherSuite         uint16
-	// secureRenegotiation bool
-	// curveID             CurveID
-	// handshakes          int
-	// isHandshakeComplete atomic.Bool
-	// handshakeErr        error
-	// handshakeFn         func(context.Context) error
-	// handshakeMutex      sync.Mutex
-	// in, out             halfConn
-	// localFinished       [12]byte
-	// remoteFinished      [12]byte
-
-	// 连接状态相关
-	// activeCall      atomic.Int32
-	// closeNotifyErr  error
-	// closeNotifySent bool
-
-	// 缓冲区/队列相关
-	readQueue []readMsgItem
+	sessions sync.Map
+	msgChan chan readMsgItem
 }
 
-func NewSecureConn(wsconn *websocket.Conn, hostId string, config *Config) *Conn {
-	return &Conn{
-		conn:     wsconn,
-		hostId:   hostId,
-		sessions: make(map[SessionID]*Session),
-		config:   config,
-	}
+func NewSecureConn(wsconn *websocket.Conn hostId string, config *Config) (*Conn, error) {
+	c := &Conn{
+		conn: wsconn,
+		hostId: hostId,
+		config: config,
+		msgChan: make(chan readMsgItem, 128),
+	}	
+	go c.readLoop()
+	return c, nil
 }
 
-type readMsgItem struct {
+
+
+type readMsgItem struct{
 	sessionId SessionID
+	// ######## remoteId 可能没用
 	remoteId  string
+	// 基础消息
 	msgType   int
 	msg       []byte
 	err       error
 }
 
-type PingPongHandler func(string) error
-
-func (c *Conn) ReadMessage() (int, []byte, error) {
-	// 1. 优先从队列读取【其实这里总的来说都是二进制应用消息了，少有其他类型的消息，比如Close消息】
-	for len(c.readQueue) == 0 {
-		if err := c.readRecord(); err != nil {
-			return 0, nil, err
+func (c *Conn) readLoop() {
+	defer func(){
+		if r:=recover();r!=nil{
+		log.Printf("readLoop panic: %v", r)
 		}
-		// 处理二次握手消息相关的逻辑要放到别的地方检查，不在这里了
-		// for c.hand.Len() > 0 {
-		// 	if err := c.handlePostHandshakeMessage(); err != nil {
-		// 		return 0,nil, err
-		// 	}
-		// }
-	}
+		// 关闭所有 session 的握手消息通道
+		c.sessions.Range(func(key, value any) bool {
+			session := value.(*Session)
+			close(session.handshakeChan)
+			return true
+		})
+		// 关闭 conn 的应用消息通道
+		close(c.msgChan)
+		log.Println("readLoop exited")
+	}()
 
-	item := c.readQueue[0]
-	c.readQueue = c.readQueue[1:]
-
-	if item.sessionId == "" {
-		// 说明不是二进制应用消息，直接返回给上层处理即可
-		return item.msgType, item.msg, item.err
+	for {
+		c.readRecord()
 	}
-
-	// 是二进制应用消息，那么就拿出对应的session，可能存在第一次通信的情况，session并不存在
-	session := c.sessions[item.sessionId]
-	if session == nil {
-		// 到这里的时候 session 不可能为 nil 了
-		// 如果是 nil 那么是有问题的
-		return 0, nil, errors.New("session not found")
-	}
-	if err := session.Handshake(); err != nil {
-		log.Printf("session handshake failed: %v", err)
-	}
-	return item.msgType, item.msg, item.err
-
+	
 }
 
-func (c *Conn) readRecord() error {
-	return c.readRecordOrCCS(false)
-}
 
-// 关于 CCS 的读写归属是不同的，比较特殊的，读归conn，写归session
-func (c *Conn) readChangeCipherSpec() error {
-	return c.readRecordOrCCS(true)
-}
-
-func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
-
-	// 这个函数主要处理消息分发
-	// 进来先读一条数据再做打算
+func (c *Conn) readRecord(){
 	msgType, msg, err := c.conn.ReadMessage()
 	if err != nil {
-		return err
+		log.Printf("readLoop ReadMessage error: %v", err)
+		c.msgChan <- readMsgItem{err: err}
+		// 这里要return 还是 continue
+		return
 	}
+	
 	// 如果不是二进制类型的，正常传递给上层
 	if msgType != websocket.BinaryMessage {
-		c.readQueue = append(c.readQueue, readMsgItem{sessionId: "", remoteId: "", msgType: msgType, msg: msg, err: err})
-		return nil
+		c.msgChan <- readMsgItem{msgType: msgType, msg: msg}
+		return
 	}
-	// 如果是二进制类型的消息，那么要解析出记录类型、用户id等信息
-	// 找到对应的 session 然后再进行握手状态相关的校验
 
-	// 解析 msg
+	// 解析 msg 构造 sessionId 并获取到对应的 session
 	typ := recordType(msg[0])
-	senderId := string(msg[1:11])
-
-	// senderId, rawContentDatas, err := parseReceivedMsg(msg, c.config.Compressor, c.config.Encoder)
-	// if err != nil {
-	// 	return err
-	// }
-
-	// 构造sessionId 并获取到对应的session
+	senderId := string(bytes.TrimRight(msg[1:11], "\x00"))
 	sessionId := getSessionID(c.hostId, senderId)
-	session := c.sessions[sessionId]
-	if session == nil {
-		// session 创建逻辑应该在这里
-		session = NewSession(sessionId, senderId, c)
-		c.sessions[sessionId] = session
+
+	actual, loaded := c.sessions.LoadOrStore(sessionId, NewSession(sessionId, senderId, c))
+	session := actual.(*Session)
+	if !loaded {
+		// 被动创建的 Session，需要主动触发握手以响应对端（对称握手）
+		// ########同步握手会阻塞用于泵数据的 readRecord 函数啊所以这里必须异步
+		go func(s *Session) {
+			if err := s.Handshake(); err != nil {
+				log.Printf("Passive handshake failed for session %s: %v", s.id, err)
+			}
+		}(session)
 	}
-	// 握手状态相关的校验，全部后置
+
+	// 握手状态校验
 	if session.in.err != nil {
-		return session.in.err
+		log.Printf("readLoop session error: %v", session.in.err)
+		// c.msgChan <- readMsgItem{err: session.in.err}
+		return
 	}
 
 	handshakeComplete := session.isHandshakeComplete.Load()
 
-	// 校验结束，开始解密
+	// 解密
 	data, err := session.in.decrypt(msg[11:])
 	if err != nil {
-		return session.in.setErrorLocked(errors.New("decrypt failed"))
+		log.Printf("readLoop decrypt error: %v", err)
+		// 这个是否合适，一次和 A 之间的解密失败，你和 A 似乎就永别了
+		session.in.setErrorLocked(errors.New("decrypt failed"))
+		// c.msgChan <- readMsgItem{err: err}
+		return
 	}
 
-	// 如果是 Application Data 消息，且没有加密算法
-	// 则发送 alertUnexpectedMessage 警告
-	// Application Data messages are always protected.
-
-	// 因为现在是允许跑空一条应用数据的，所以不能有这个检查！【todo：换成别的检查】
-	//【session中增加一个字段，初始化为false，握手函数中会被置为true，
-	// 也就是说这里如果是刚初始化的session，那么这个字段就是false，
-	// 那么就说明是第一次通信，那么就允许跑空一条应用数据】
-	// if session.in.cipher == nil && typ == recordTypeApplicationData {
-	// 	return session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
-	// }
-
-	// 处理不同类型的TLS记录
-	switch typ {
+    switch typ {
 	default:
-		return session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
-
-	// 处理 TLS 应用数据记录
+		// 收到来自A的诡异消息，可能是被攻击了，也是永久关闭和A的通信了
+		log.Printf("readLoop unexpected message type: %d", typ)
+		session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		// c.msgChan <- readMsgItem{err: errors.New("alertUnexpectedMessage")}
+		return
+	
+	// 收到来自 A 的应用数据记录
 	case recordTypeApplicationData:
-		if !handshakeComplete || expectChangeCipherSpec {
-			return session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		// #############handshake 是异步的 这里的话很有可能没完成啊！
+		// 如果是加载出来的旧 session，没有完成就不行
+		// 如果是新 session 也就是第一条和A通信的应用消息，那么没有完成握手也是合法的！
+		// 特殊情况：握手太慢，第二条来的有太快了，来了还没握好，怎么办，直接永久错误？
+		if !handshakeComplete && loaded {
+			log.Printf("readLoop unexpected AppData: handshakeComplete=%v, expectedCCS=%v", handshakeComplete, expected)
+			session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+			// c.msgChan <- readMsgItem{err: errors.New("alertUnexpectedMessage")}
+			return
 		}
-		if len(data) == 0 {
-			// todo：retryReadRecord
-			// return c.retryReadRecord(expectChangeCipherSpec)
-			return errors.New("empty application data record")
-		}
-		// 将解密后的data 通过 readQueue 传递给上层
-		c.readQueue = append(c.readQueue, readMsgItem{sessionId: sessionId, remoteId: senderId, msgType: msgType, msg: data, err: err})
-		return nil
+		// 当前场景下，其实收到一个只有自定义添加的头部而body是空包的情况
+		// 可以说是不可能的，这相当于上层WriteMessage就是写的空[]byte
+		// if len(data) == 0 {
+		// 	// empty application data record
+		// 	// c.msgChan <- readMsgItem{err: errors.New("empty application data record")}
+		// 	// 忽略空包，继续读取
+		// 	return
+		// }
 
-	// 处理 TLS 握手记录
+		// 正常向上层传递应用数据记录
+		c.msgChan <- readMsgItem{sessionId: sessionId, remoteId: senderId, msgType: msgType, msg: data, err: nil}
+
+	// 收到来自 A 的握手记录
 	case recordTypeHandshake:
-		if len(data) == 0 || expectChangeCipherSpec {
-			return errors.New("alertUnexpectedMessage")
+		// if len(data) == 0 {
+		// 	c.msgChan <- readMsgItem{err: errors.New("alertUnexpectedMessage")}
+		// 	return
+		// }
+
+		// 发送到 session 专属通道
+		select {
+		case session.handshakeChan <- sessionMsg{typ: recordTypeHandshake, data: data}:
+		default:
+			// 防止阻塞 readLoop，虽然理论上握手过程应该在消费不会阻塞
+			//########### 但是如果 handshakeChan 写不进去阻塞了，这条握手消息相当于就丢弃掉了
+			// log.Println("session handshake channel full, dropping message")
+			log.Printf("readLoop handshake channel blocked for session %s", session.id)
+			// c.msgChan <- readMsgItem{err: errors.New("handshake channel blocked")}
+			return
 		}
-		session.hand = append(session.hand, data)
 
 	case recordTypeChangeCipherSpec:
-		// todo : 扩展为可携带 sm2 的 cs 数据【感觉可以通过hand传递过去，然后在readFinished中处理】
+		// CCS 消息检查
 		if len(data) != 1 || data[0] != 1 {
-			return session.in.setErrorLocked(errors.New("alertDecodeError"))
+			session.in.setErrorLocked(errors.New("alertDecodeError"))
+			// c.msgChan <- readMsgItem{err: errors.New("alertDecodeError")}
+			return
 		}
-		// Handshake messages are not allowed to fragment across the CCS.
-		if len(session.hand) > 0 {
-			return session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
-		}
-		if !expectChangeCipherSpec {
-			return session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
-		}
+
 		// 变更 in 的密码套件
 		if err := session.in.changeCipherSpec(); err != nil {
-			return session.in.setErrorLocked(errors.New("change cipher failed!"))
+			log.Printf("readLoop changeCipherSpec error: %v", err)
+			session.in.setErrorLocked(errors.New("change cipher failed!"))
+			// c.msgChan <- readMsgItem{err: errors.New("change cipher failed!")}
+			return
 		}
 
+		// ###################通知 Session CCS 已收到【为啥要通知？？】
+		select {
+		case session.handshakeChan <- sessionMsg{typ: recordTypeChangeCipherSpec, data: data}:
+		default:
+			log.Printf("readLoop handshake channel blocked on CCS for session %s", session.id)
+			// c.msgChan <- readMsgItem{err: errors.New("handshake channel blocked on CCS")}
+			return
+		}	
 	}
-
-	return nil
-}
-
-func (c *Conn) WriteMessage(messageType int, message []byte) error {
-
-	// 似乎这里必须要写一段拆包逻辑来获取 receiveId 或者说 remoteId
-	// 和服务端的拆包逻辑相同，和模拟客户端的打包逻辑相反
-	remoteId, err := parseReceivedMsg(message, c.config.compressor(), c.config.encoder())
-	if err != nil {
-		return err
-	}
-	sessionId := getSessionID(c.hostId, remoteId)
-
-	session := c.sessions[sessionId]
-	if session == nil {
-		// 初始化session
-		session = NewSession(sessionId, remoteId, c)
-		c.sessions[sessionId] = session
-	}
-	// 看起来在 write 这边握手操作是可以前置的，因为他在写操作之前就可以知道是要给谁发
-	// 从而获取到对应 session，但是这样的话和某个用户之间的首次通信就会是一个握手数据，而不是应用数据【没有漏一条应用数据进行握手触发的效果】
-	// 就会和 read 那边的逻辑对不上，所以还是需要漏一个应用数据的
-	// 所以 write 这边的握手触发也要后置，先 write 一条再说
-
-	// 三种数据类型：应用、握手、CCS，这里肯定是应用来的
-
-	err = c.writeRecordLocked(recordTypeApplicationData, message, session)
-	if err != nil {
-		return err
-	}
-
-	// 握手检查（握手确实要后置，但是session相关，即使是第一条消息，也会带session前缀所以session相关不后置）
-	if err := session.Handshake(); err != nil {
-		return err
-	}
-
-	if err := session.out.err; err != nil {
-		return err
-	}
-
-	if !session.isHandshakeComplete.Load() {
-		return errors.New("[Write] handshake not complete")
-	}
-	return nil
-}
-
-// 现在还有必要使用 outBufPool 吗
-// 与 readRecord 同理 writeRecord由于被应用层和握手层调用，所以应该是会有并发问题的（又好像没有）
-func (c *Conn) writeRecordLocked(typ recordType, data []byte, session *Session) error {
-	// writeRecordLocked 写入记录，这里的 type 只能是握手/应用/变更密码
-	if len(data) == 0 {
-		return errors.New("zero length write")
-	}
-
-	// 直接分配内存，避免 sync.Pool 不当使用导致的 panic 风险和代码复杂度
-	// 头部格式：[1字节类型][10字节HostID]
-	outBuf := make([]byte, 11)
-	outBuf[0] = byte(typ)
-	copy(outBuf[1:11], c.hostId)
-
-	var err error
-	// encrypt 方法通常会将加密后的内容追加到 outBuf 后面
-	outBuf, err = session.out.encrypt(outBuf, data, c.config.rand())
-	if err != nil {
-		return err
-	}
-	err = c.conn.WriteMessage(websocket.BinaryMessage, outBuf)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (c *Conn) Close() error {
-	return c.conn.Close()
-}
-
-func (c *Conn) SetReadDeadline(timeout time.Duration) error {
-	return c.conn.SetReadDeadline(time.Now().Add(timeout))
-}
-
-func (c *Conn) SetWriteDeadline(timeout time.Duration) error {
-	return c.conn.SetWriteDeadline(time.Now().Add(timeout))
-}
-
-func (c *Conn) SetReadLimit(limit int64) {
-	c.conn.SetReadLimit(limit)
 
 }
 
-func (c *Conn) SetPingHandler(handler PingPongHandler) {
-	c.conn.SetPingHandler(handler)
-}
 
-func (c *Conn) SetPongHandler(handler PingPongHandler) {
-	c.conn.SetPongHandler(handler)
-}
-
-func (c *Conn) LocalAddr() string {
-	return c.conn.LocalAddr().String()
-}
-
-// func NewWebSocket(connType int) *Default {
-// 	return &Default{ConnType: connType}
-// }
-
-func (c *Conn) Dial(urlStr string, requestHeader http.Header) (*http.Response, error) {
-	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
-	if err == nil {
-		c.conn = conn
-	}
-	return httpResp, err
-}
-
-func (c *Conn) IsNil() bool {
-	if c.conn != nil {
-		return false
-	}
-	return true
-}
-
-// 返回发送者的id和消息内容未解密的 rawContentData 列表，虽然是列表但是就一个数据一般
-func parseReceivedMsg(msg []byte, compressor compressor.Compressor, encoder encoder.Encoder) (string, error) {
-
-	// 解压
-	decompressMsg, err := compressor.DecompressWithPool(msg)
-	if err != nil {
-		log.Printf("解压消息失败: %v", err)
-		return "", err
-	}
-
-	// 解码
-	var req Req
-	err = encoder.Decode(decompressMsg, &req)
-	if err != nil {
-		log.Printf("解码消息失败: %v", err)
-		return "", err
-	}
-
-	var msgData sdkws.MsgData
-	if err := proto.Unmarshal(req.Data, &msgData); err != nil {
-		return "", err
-	}
-
-	// var pushMsg sdkws.PushMessages
-	// // 反序列化到 PushMessages 结构体
-	// err = proto.Unmarshal(req.Data, &pushMsg)
-	// if err != nil {
-	// 	log.Printf("反序列化消息失败: %v", err)
-	// 	return "", nil, err
-	// }
-
-	return msgData.RecvID, nil
-}
-
-func getSessionID(A, B string) SessionID {
-	if A < B {
-		return SessionID(A + "_" + B)
-	}
-	return SessionID(B + "_" + A)
-}
