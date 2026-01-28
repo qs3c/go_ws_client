@@ -105,7 +105,7 @@ var cipherSuitesPreferenceOrder = []uint16{
 
 // 目前密码套件仅一种实现
 var cipherSuites = map[uint16]*cipherSuite{
-	E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3: {E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3, 16, 0, 4, sm2KA, suiteTLS12, nil, nil, sm4tongsuo.NewSm4AEADCipher},
+	E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3: {E2E_MLKEMSM2_WITH_SM4_128_GCM_SM3, 16, 0, 4, &sm2KeyAgreement{}, suiteTLS12, nil, nil, sm4tongsuo.NewSm4AEADCipher},
 }
 
 type cipherSuite struct {
@@ -180,18 +180,30 @@ func mutualCipherSuiteOld(have []uint16, want uint16) *cipherSuite {
 	return nil
 }
 
-func mutualCipherSuite(have []uint16, want []uint16) *cipherSuite {
-	pickedCiphersuite := Intersection(have, want)
-	if pickedCiphersuite == 0 {
+func mutualCipherSuite(have []uint16, want []uint16, preferHave bool) *cipherSuite {
+	preferred := have
+	other := want
+	if !preferHave {
+		preferred = want
+		other = have
+	}
+	pickedCiphersuite, ok := Intersection(preferred, other)
+	if !ok {
 		return nil
 	}
 	return cipherSuiteByID(pickedCiphersuite)
 }
 
 // 暂时放在这，放这里不太合适其实
-func mutualSignatureScheme(have []SignatureScheme, want []SignatureScheme) SignatureScheme {
-	pickedSignatureScheme := Intersection(have, want)
-	if pickedSignatureScheme == 0 {
+func mutualSignatureScheme(have []SignatureScheme, want []SignatureScheme, preferHave bool) SignatureScheme {
+	preferred := have
+	other := want
+	if !preferHave {
+		preferred = want
+		other = have
+	}
+	pickedSignatureScheme, ok := Intersection(preferred, other)
+	if !ok {
 		return 0
 	}
 	return pickedSignatureScheme
@@ -202,10 +214,19 @@ func cipherSuiteByID(id uint16) *cipherSuite {
 	if !ok {
 		return nil
 	}
-	return suite
+	clone := *suite
+	clone.ka = cloneKeyAgreement(suite.ka)
+	return &clone
 }
 
-var sm2KA = &sm2KeyAgreement{}
+func cloneKeyAgreement(ka keyAgreement) keyAgreement {
+	switch ka.(type) {
+	case *sm2KeyAgreement:
+		return &sm2KeyAgreement{}
+	default:
+		return ka
+	}
+}
 
 // func sm2KA(version uint16) keyAgreement {
 // 	return &sm2KeyAgreement{}

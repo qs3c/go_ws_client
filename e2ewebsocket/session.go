@@ -16,13 +16,14 @@ import (
 
 type SessionID string
 
-
 // Session: 负责单个逻辑会话的协商和加密
 type Session struct {
 	// 初始化时要填入的参数
 	id       SessionID
 	remoteId string //【似乎可以不要】 因为 ws 里面记录了 hostId，所以 session 中记录对方的 id，避免出现需要从 id 里提取两个 id 的情况
 	conn     *Conn
+
+	isInitiator bool
 
 	// 协商确定的参数
 	vers                uint16
@@ -32,6 +33,7 @@ type Session struct {
 
 	handshakes          int
 	isHandshakeComplete atomic.Bool
+	handshakeInProgress atomic.Bool
 	handshakeErr        error
 	handshakeFn         func(context.Context) error
 	handshakeMutex      sync.Mutex
@@ -39,14 +41,16 @@ type Session struct {
 	localFinished       [12]byte
 	remoteFinished      [12]byte
 
-	hand [][]byte
+	handMu sync.Mutex
+	hand   [][]byte
 }
 
 func NewSession(id SessionID, remoteId string, conn *Conn) *Session {
 	s := Session{
-		id:       id,
-		remoteId: remoteId,
-		conn:     conn,
+		id:          id,
+		remoteId:    remoteId,
+		conn:        conn,
+		isInitiator: isInitiator(conn.hostId, remoteId),
 	}
 	s.handshakeFn = s.symHandshake
 	return &s
@@ -66,6 +70,9 @@ func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 	if s.isHandshakeComplete.Load() {
 		return nil
 	}
+
+	s.handshakeInProgress.Store(true)
+	defer s.handshakeInProgress.Store(false)
 
 	handshakeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -154,15 +161,20 @@ func (s *Session) readHandshake(transcript transcriptHash) (any, error) {
 
 	// 合理应该弄一个最高上限次数，或者说超时时间，不能一致循环在这里
 	// 其实感觉 readRecord 这个函数可能会有并发问题啊！是不是！
-	for len(s.hand) == 0 {
+	var data []byte
+	for {
+		s.handMu.Lock()
+		if len(s.hand) > 0 {
+			data = s.hand[0]
+			s.hand = s.hand[1:]
+			s.handMu.Unlock()
+			break
+		}
+		s.handMu.Unlock()
 		if err := s.conn.readRecord(); err != nil {
 			return nil, err
 		}
 	}
-
-	// 读取handshake数据
-	data := s.hand[0]
-	s.hand = s.hand[1:]
 
 	maxHandshakeSize := maxHandshake
 
@@ -179,9 +191,16 @@ func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHa
 	// [1字节类型|和消息内容]
 	// 无需长度
 	var m handshakeMessage
+	if len(data) == 0 {
+		return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
+	}
 	switch data[0] {
 	case typeHelloMsg:
 		m = new(helloMsg)
+	case typeKeyExchange:
+		m = new(keyExchangeMsg)
+	case typeFinished:
+		m = new(finishedMsg)
 	// todo  补充其他消息
 	default:
 		return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
@@ -223,8 +242,10 @@ func (s *Session) writeHandshakeRecord(msg handshakeMessage, transcript transcri
 func (s *Session) writeChangeCipherRecord() error {
 	// c.out.Lock()
 	// defer c.out.Unlock()
-	err := s.conn.writeRecordLocked(recordTypeChangeCipherSpec, []byte{1}, s)
-	return err
+	if err := s.conn.writeRecordLocked(recordTypeChangeCipherSpec, []byte{1}, s); err != nil {
+		return err
+	}
+	return s.out.changeCipherSpec()
 }
 
 //  涉及重协商的这两个功能先不做
@@ -276,23 +297,28 @@ func (s *Session) writeChangeCipherRecord() error {
 // }
 
 type halfConn struct {
-	// sync.Mutex
+	mu      sync.Mutex
 	err     error  // first permanent error
 	version uint16 // protocol version
 	cipher  any    // cipher algorithm
 	mac     hash.Hash
 	seq     [8]byte // 64-bit sequence number
 
-	scratchBuf [13]byte // to avoid allocs; interface method args escape
+	scratchBuf [21]byte // to avoid allocs; interface method args escape
 
 	nextCipher any       // next encryption state
 	nextMac    hash.Hash // next MAC algorithm
 }
 
-func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
+func (hc *halfConn) decrypt(header, payload []byte) ([]byte, error) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
 
 	// 我传进来的整个都是 payload 不是带 header 的 record
 	var plaintext []byte
+	if len(header) != recordHeaderLen {
+		return nil, errors.New("invalid record header")
+	}
 
 	explicitNonceLen := hc.explicitNonceLen()
 
@@ -300,6 +326,7 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 		switch c := hc.cipher.(type) {
 		case cipher.Stream:
 			c.XORKeyStream(payload, payload)
+			plaintext = payload
 		case ccrypto.AEAD:
 
 			if len(payload) < explicitNonceLen {
@@ -317,6 +344,7 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 			// 这个 13 字节的 scratchBuf 设计以及 scratchBuf[:0] 操作是很秀的
 			// additionalData 变量底层指向的是 scratchBuf 指向的数组
 			additionalData = append(hc.scratchBuf[:0], hc.seq[:]...)
+			additionalData = append(additionalData, header...)
 			n := len(payload) - c.Overhead()
 			additionalData = append(additionalData, byte(n>>8), byte(n))
 
@@ -389,6 +417,11 @@ func (hc *halfConn) decrypt(payload []byte) ([]byte, error) {
 }
 
 func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, error) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	if len(record) < recordHeaderLen {
+		return nil, errors.New("invalid record header")
+	}
 	if hc.cipher == nil {
 		return append(record, payload...), nil
 	}
@@ -426,7 +459,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 			nonce = hc.seq[:]
 		}
 		additionalData := append(hc.scratchBuf[:0], hc.seq[:]...)
-		// additionalData = append(additionalData,record[:1]...)
+		additionalData = append(additionalData, record[:recordHeaderLen]...)
 		additionalData = append(additionalData, byte(len(payload)>>8), byte(len(payload)))
 		record = c.Seal(record, nonce, payload, additionalData)
 
@@ -456,12 +489,16 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 }
 
 func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
 }
 
 func (hc *halfConn) changeCipherSpec() error {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
 	if hc.nextCipher == nil {
 		return errors.New("alertInternalError")
 	}

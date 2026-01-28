@@ -6,7 +6,6 @@ import (
 	"errors"
 
 	ccrypto "github.com/albert/ws_client/crypto"
-	"github.com/albert/ws_client/crypto/ecdh_curve"
 	"github.com/albert/ws_client/crypto/sm2keyexch"
 	"github.com/albert/ws_client/crypto/sm2tongsuo"
 	"github.com/albert/ws_client/crypto/sm3tongsuo"
@@ -33,6 +32,7 @@ type sm2KeyAgreement struct {
 	localId               string
 	remoteId              string
 	ctxLocal              *sm2keyexch.KAPCtx
+	initiator             bool
 
 	kxmLocal        *keyExchangeMsg
 	preMasterSecret []byte
@@ -49,8 +49,9 @@ func NewSM2KeyAgreement(local ccrypto.EVPPrivateKey, localId string, remote ccry
 	if err != nil {
 		return nil
 	}
+	initiator := isInitiator(localId, remoteId)
 	ctxLocal := sm2keyexch.NewKAPCtx()
-	if err := ctxLocal.Init(localECKEY, localId, remoteECKEY, remoteId, localId > remoteId, true); err != nil {
+	if err := ctxLocal.Init(localECKEY, localId, remoteECKEY, remoteId, initiator, true); err != nil {
 		return nil
 	}
 	return &sm2KeyAgreement{
@@ -59,11 +60,41 @@ func NewSM2KeyAgreement(local ccrypto.EVPPrivateKey, localId string, remote ccry
 		remoteStaticPublicKey: remote,
 		remoteId:              remoteId,
 		ctxLocal:              ctxLocal,
+		initiator:             initiator,
 		// keyLen:                keyLen,
 	}
 }
 
+func (ka *sm2KeyAgreement) initContext() error {
+	if ka.ctxLocal != nil {
+		return nil
+	}
+	if ka.localStaticPrivateKey == nil || ka.remoteStaticPublicKey == nil {
+		return errors.New("missing static key material")
+	}
+	localECKEY, err := ccrypto.ToECKey(ka.localStaticPrivateKey)
+	if err != nil {
+		return err
+	}
+	remoteECKEY, err := ccrypto.ToECKey(ka.remoteStaticPublicKey)
+	if err != nil {
+		return err
+	}
+	if ka.localId == "" || ka.remoteId == "" {
+		return errors.New("missing peer identifiers")
+	}
+	ctxLocal := sm2keyexch.NewKAPCtx()
+	if err := ctxLocal.Init(localECKEY, ka.localId, remoteECKEY, ka.remoteId, ka.initiator, true); err != nil {
+		return err
+	}
+	ka.ctxLocal = ctxLocal
+	return nil
+}
+
 func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, signatureScheme SignatureScheme, hello *helloMsg, remoteHello *helloMsg) (*keyExchangeMsg, error) {
+	if err := ka.initContext(); err != nil {
+		return nil, err
+	}
 	// 1. 产生临时随机公钥 RA 放到 kxm 的 key 中
 	RA, err := ka.ctxLocal.Prepare()
 	if err != nil {
@@ -87,9 +118,12 @@ func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, signatureSch
 	if err != nil {
 		return nil, err
 	}
+	if sigType != signatureSM2 {
+		return nil, errors.New("unsupported signature scheme for SM2 key agreement")
+	}
 	// initiator 的随机值在前
 	var signed []byte
-	if ka.localId > ka.remoteId {
+	if ka.initiator {
 		signed = hashForKeyExchange(sigType, sigHash, hello.random, remoteHello.random, localECDHEParams)
 	} else {
 		signed = hashForKeyExchange(sigType, sigHash, remoteHello.random, hello.random, localECDHEParams)
@@ -116,6 +150,9 @@ func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, signatureSch
 
 // 这本来就是 sm2 交换的密钥处理逻辑函数，无需考虑兼容性
 func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureScheme SignatureScheme, hello *helloMsg, remoteHello *helloMsg, kxm *keyExchangeMsg) ([]byte, error) {
+	if err := ka.initContext(); err != nil {
+		return nil, err
+	}
 	// 第一部分：验证临时公钥
 	if len(kxm.key) < 4 {
 		return nil, errKeyExchange
@@ -129,10 +166,6 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	if curveID != SM2CurveP256V1 {
 		return nil, errors.New("remote used unsupported curve")
 	}
-
-	// 在这里基于ka新建curve
-	// 谁 id 大谁是 initiator
-	sm2Curve := ecdh_curve.NewSm2P256V1(ka.localId > ka.remoteId)
 
 	// publicKey 是 RB
 	publicLen := int(kxm.key[3])
@@ -167,20 +200,11 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	// 而 sm2 交换中没有临时私钥
 	// ecdh 有必要做到 curve 上吗，有必要做接口兼容吗
 
-	// 新建一个空privateKey 纯粹是为了调用curve的ecdh绕的远路，因为sm2没有显示的临时私钥，
-	// 所以说有没有必要做兼容，这些都是兼容带来的代价，兼容带来的优势是？
-	key := ecdh_curve.NewEmptySm2PrivateKey(sm2Curve)
-
-	// 把 RB 放到 PublicKey 结构体里面
-	peerKey, err := key.Curve().NewPublicKey(publicKey)
+	sharedKey, _, err := ka.ctxLocal.ComputeKey(publicKey, 32)
 	if err != nil {
 		return nil, errKeyExchange
 	}
-
-	ka.preMasterSecret, err = key.ECDH(peerKey)
-	if err != nil {
-		return nil, errKeyExchange
-	}
+	ka.preMasterSecret = sharedKey
 
 	// 把自己的临时公钥做成 clientKeyExchangeMsg【放到下面去！】
 	// ourPublicKey := key.PublicKey().Bytes()
@@ -267,9 +291,6 @@ func hashForKeyExchange(sigType uint8, hashFunc crypto.Hash, slices ...[]byte) [
 			signed = append(signed, slice...)
 		}
 		return signed
-	}
-	if sigType == signatureECDSA {
-		return sha1Hash(slices)
 	}
 	// SM3 特别处理
 	if hashFunc == sm3tongsuo.SM3HASH {

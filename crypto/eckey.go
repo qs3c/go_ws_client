@@ -1,8 +1,8 @@
 package crypto
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../third_party/tongsuo-install/include -I${SRCDIR}/../third_party/tongsuo/include -DOPENSSL_API_COMPAT=0x10100000L
-#cgo LDFLAGS: -L${SRCDIR}/sm2keyexch -L${SRCDIR}/../third_party/tongsuo-install -L${SRCDIR}/../third_party/tongsuo-install/lib -lkeyexchange -lcrypto -lssl
+#cgo CFLAGS: -ID:/go_ws_client/third_party/tongsuo-install/include -ID:/go_ws_client/third_party/tongsuo/include -DOPENSSL_API_COMPAT=0x10100000L
+#cgo LDFLAGS: -L${SRCDIR}/sm2keyexch -LD:/go_ws_client/third_party/tongsuo-install -LD:/go_ws_client/third_party/tongsuo-install/lib -lkeyexchange -lcrypto -lssl
 #include "./sm2keyexch/keyexchange.h"
 #include <openssl/ec.h>
 #include <openssl/x509.h>

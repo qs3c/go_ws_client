@@ -12,19 +12,22 @@ func sliceForAppend(in []byte, n int) (head, tail []byte) {
 }
 
 // Intersection 通用切片交集（无重复元素专用）
-func Intersection[T comparable](a, b []T) T {
-	elementMap := make(map[T]struct{}, len(a))
-	for _, v := range a {
+func Intersection[T comparable](preferred, other []T) (T, bool) {
+	if len(preferred) == 0 || len(other) == 0 {
+		var zero T
+		return zero, false
+	}
+	elementMap := make(map[T]struct{}, len(other))
+	for _, v := range other {
 		elementMap[v] = struct{}{}
 	}
-
-	for _, v := range b {
+	for _, v := range preferred {
 		if _, exists := elementMap[v]; exists {
-			return v
+			return v, true
 		}
 	}
 	var zero T
-	return zero
+	return zero, false
 }
 
 func BEUint16(b []byte) uint16 {

@@ -170,7 +170,7 @@ type Config struct {
 }
 
 // 默认密钥存储路径：可以给一个系统路径，目前先用工作区路径
-var defaultKeyStorePath string = "./static_key"
+var defaultKeyStorePath string = "./e2ewebsocket/static_key"
 
 // 压缩器
 // compressor := compressor.NewGzipCompressor()
@@ -180,7 +180,8 @@ var defaultKeyStorePath string = "./static_key"
 var emptyConfig Config
 
 func defaultConfig() *Config {
-	return &emptyConfig
+	cfg := emptyConfig
+	return &cfg
 }
 
 func (c *Config) keyStorePath() string {
@@ -250,11 +251,31 @@ func (c *Config) rand() io.Reader {
 }
 
 func (c *Config) mutualVersion(peerVersions []uint16) (uint16, bool) {
-	pickedVersion := Intersection(c.supportedVersions, peerVersions)
-	if peerVersions == nil {
+	if len(peerVersions) == 0 {
 		return 0, false
 	}
-	return pickedVersion, true
+	supported := c.supportedVersions
+	if supported == nil {
+		supported = c.defaultSupportedVersions()
+	}
+	peerSet := make(map[uint16]struct{}, len(peerVersions))
+	for _, v := range peerVersions {
+		peerSet[v] = struct{}{}
+	}
+	var picked uint16
+	found := false
+	for _, v := range supported {
+		if _, ok := peerSet[v]; ok {
+			if !found || v > picked {
+				picked = v
+				found = true
+			}
+		}
+	}
+	if !found {
+		return 0, false
+	}
+	return picked, true
 }
 
 func (c *Config) defaultSupportedVersions() []uint16 {

@@ -22,8 +22,6 @@ import (
 
 // 基于 sm4Encrypter 和 sm4Decrypter 实现 aead 接口 【其实不实现也可以的】
 
-
-
 // func NewSm4AEADCipher(key, iv []byte, isEncrypt bool) cipher.AEAD {
 // 	if isEncrypt {
 // 		return NewSm4AEADEncrypter(key, iv)
@@ -34,26 +32,45 @@ import (
 type sm4AEADCipher struct {
 	enc *sm4Encrypter
 	dec *sm4Decrypter
+	// fixed IV from key schedule (TLS-style fixed nonce)
+	fixedIV []byte
 }
 
 func NewSm4AEADCipher(key, iv []byte) cipher.AEAD {
-	enc, err := NewEncrypter(crypto.CipherModeGCM, key, iv)
+	fixedIV := append([]byte(nil), iv...)
+	fullIV := make([]byte, 12)
+	copy(fullIV, fixedIV)
+	enc, err := NewEncrypter(crypto.CipherModeGCM, key, fullIV)
 	if err != nil {
 		fmt.Printf("sm4AEADCipher NewSm4AEADCipher error [NewEncrypter]: %v", err)
 		return nil
 	}
-	dec, err := NewDecrypter(crypto.CipherModeGCM, key, iv)
+	dec, err := NewDecrypter(crypto.CipherModeGCM, key, fullIV)
 	if err != nil {
 		fmt.Printf("sm4AEADCipher NewSm4AEADCipher error [NewDecrypter]: %v", err)
 		return nil
 	}
 	return &sm4AEADCipher{
-		enc: enc,
-		dec: dec,
+		enc:     enc,
+		dec:     dec,
+		fixedIV: fixedIV,
 	}
 }
 
 func (c *sm4AEADCipher) Seal(dst, nonce, plaintext, aad []byte) []byte {
+	if len(nonce) != c.NonceSize() {
+		fmt.Printf("sm4AEADCipher Seal error [invalid nonce size]: %d", len(nonce))
+		return nil
+	}
+	fullNonce := make([]byte, 0, len(c.fixedIV)+len(nonce))
+	fullNonce = append(fullNonce, c.fixedIV...)
+	fullNonce = append(fullNonce, nonce...)
+	if cap(c.enc.iv) >= len(fullNonce) {
+		c.enc.iv = c.enc.iv[:len(fullNonce)]
+		copy(c.enc.iv, fullNonce)
+	} else {
+		c.enc.iv = append([]byte(nil), fullNonce...)
+	}
 	// 设置 AAD
 	c.enc.SetAAD(aad)
 	// 加密
@@ -75,6 +92,18 @@ func (c *sm4AEADCipher) Seal(dst, nonce, plaintext, aad []byte) []byte {
 }
 
 func (c *sm4AEADCipher) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error) {
+	if len(nonce) != c.NonceSize() {
+		return nil, errors.New("invalid nonce size")
+	}
+	fullNonce := make([]byte, 0, len(c.fixedIV)+len(nonce))
+	fullNonce = append(fullNonce, c.fixedIV...)
+	fullNonce = append(fullNonce, nonce...)
+	if cap(c.dec.iv) >= len(fullNonce) {
+		c.dec.iv = c.dec.iv[:len(fullNonce)]
+		copy(c.dec.iv, fullNonce)
+	} else {
+		c.dec.iv = append([]byte(nil), fullNonce...)
+	}
 	// 设置 AAD
 	c.dec.SetAAD(aad)
 	tag := ciphertext[len(ciphertext)-c.Overhead():]
@@ -93,8 +122,8 @@ func (c *sm4AEADCipher) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error)
 }
 
 func (c *sm4AEADCipher) NonceSize() int {
-	// return len(e.enc.iv)
-	return 12
+	// explicit nonce length (fixed IV is prepended internally)
+	return 8
 }
 
 // 返回 tag 长度 GCM 是 16
@@ -104,7 +133,7 @@ func (c *sm4AEADCipher) Overhead() int {
 
 // 返回需要显示传输的 nonce 长度
 func (c *sm4AEADCipher) ExplicitNonceLen() int {
-	// 如果没有使用特别的技术，需要显示传输的 nonce 长度就是原本的 iv 长度
+	// explicit nonce length (fixed IV is prepended internally)
 	return c.NonceSize()
 }
 
@@ -124,6 +153,16 @@ func NewSm4AEADEncrypter(key, iv []byte) *sm4AEADEncrypter {
 }
 
 func (e *sm4AEADEncrypter) Seal(dst, nonce, plaintext, aad []byte) []byte {
+	if len(nonce) != e.NonceSize() {
+		fmt.Printf("sm4AEADEncrypter Seal error [invalid nonce size]: %d", len(nonce))
+		return nil
+	}
+	if cap(e.enc.iv) >= len(nonce) {
+		e.enc.iv = e.enc.iv[:len(nonce)]
+		copy(e.enc.iv, nonce)
+	} else {
+		e.enc.iv = append([]byte(nil), nonce...)
+	}
 	// 设置 AAD
 	e.enc.SetAAD(aad)
 	// 加密
@@ -184,6 +223,15 @@ func NewSm4AEADDecrypter(key, iv []byte) *sm4AEADDecrypter {
 }
 
 func (e *sm4AEADDecrypter) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error) {
+	if len(nonce) != e.NonceSize() {
+		return nil, errors.New("invalid nonce size")
+	}
+	if cap(e.dec.iv) >= len(nonce) {
+		e.dec.iv = e.dec.iv[:len(nonce)]
+		copy(e.dec.iv, nonce)
+	} else {
+		e.dec.iv = append([]byte(nil), nonce...)
+	}
 	// 设置 AAD
 	e.dec.SetAAD(aad)
 	tag := ciphertext[len(ciphertext)-e.Overhead():]

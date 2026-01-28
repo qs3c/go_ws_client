@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/albert/ws_client/compressor"
@@ -20,6 +22,9 @@ type Conn struct {
 	config *Config
 
 	sessions map[SessionID]*Session
+	mu       sync.Mutex
+	readMu   sync.Mutex
+	writeMu  sync.Mutex
 
 	// 握手状态相关
 	// vers                uint16
@@ -65,38 +70,39 @@ type PingPongHandler func(string) error
 
 func (c *Conn) ReadMessage() (int, []byte, error) {
 	// 1. 优先从队列读取【其实这里总的来说都是二进制应用消息了，少有其他类型的消息，比如Close消息】
-	for len(c.readQueue) == 0 {
+	for {
+		c.mu.Lock()
+		if len(c.readQueue) > 0 {
+			item := c.readQueue[0]
+			c.readQueue = c.readQueue[1:]
+			c.mu.Unlock()
+
+			if item.sessionId == "" {
+				// 说明不是二进制应用消息，直接返回给上层处理即可
+				return item.msgType, item.msg, item.err
+			}
+
+			// 是二进制应用消息，那么就拿出对应的session，可能存在第一次通信的情况，session并不存在
+			c.mu.Lock()
+			session := c.sessions[item.sessionId]
+			c.mu.Unlock()
+			if session == nil {
+				// 到这里的时候 session 不可能为 nil 了
+				// 如果是 nil 那么是有问题的
+				return 0, nil, errors.New("session not found")
+			}
+			if err := session.Handshake(); err != nil {
+				log.Printf("session handshake failed: %v", err)
+			}
+			return item.msgType, item.msg, item.err
+		}
+		c.mu.Unlock()
+
 		if err := c.readRecord(); err != nil {
 			return 0, nil, err
 		}
 		// 处理二次握手消息相关的逻辑要放到别的地方检查，不在这里了
-		// for c.hand.Len() > 0 {
-		// 	if err := c.handlePostHandshakeMessage(); err != nil {
-		// 		return 0,nil, err
-		// 	}
-		// }
 	}
-
-	item := c.readQueue[0]
-	c.readQueue = c.readQueue[1:]
-
-	if item.sessionId == "" {
-		// 说明不是二进制应用消息，直接返回给上层处理即可
-		return item.msgType, item.msg, item.err
-	}
-
-	// 是二进制应用消息，那么就拿出对应的session，可能存在第一次通信的情况，session并不存在
-	session := c.sessions[item.sessionId]
-	if session == nil {
-		// 到这里的时候 session 不可能为 nil 了
-		// 如果是 nil 那么是有问题的
-		return 0, nil, errors.New("session not found")
-	}
-	if err := session.Handshake(); err != nil {
-		log.Printf("session handshake failed: %v", err)
-	}
-	return item.msgType, item.msg, item.err
-
 }
 
 func (c *Conn) readRecord() error {
@@ -112,21 +118,28 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 
 	// 这个函数主要处理消息分发
 	// 进来先读一条数据再做打算
+	c.readMu.Lock()
 	msgType, msg, err := c.conn.ReadMessage()
+	c.readMu.Unlock()
 	if err != nil {
 		return err
 	}
 	// 如果不是二进制类型的，正常传递给上层
 	if msgType != websocket.BinaryMessage {
+		c.mu.Lock()
 		c.readQueue = append(c.readQueue, readMsgItem{sessionId: "", remoteId: "", msgType: msgType, msg: msg, err: err})
+		c.mu.Unlock()
 		return nil
+	}
+	if len(msg) < recordHeaderLen {
+		return errors.New("alertDecodeError")
 	}
 	// 如果是二进制类型的消息，那么要解析出记录类型、用户id等信息
 	// 找到对应的 session 然后再进行握手状态相关的校验
 
 	// 解析 msg
 	typ := recordType(msg[0])
-	senderId := string(msg[1:11])
+	senderId := trimSenderID(msg[1:recordHeaderLen])
 
 	// senderId, rawContentDatas, err := parseReceivedMsg(msg, c.config.Compressor, c.config.Encoder)
 	// if err != nil {
@@ -135,12 +148,14 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 
 	// 构造sessionId 并获取到对应的session
 	sessionId := getSessionID(c.hostId, senderId)
+	c.mu.Lock()
 	session := c.sessions[sessionId]
 	if session == nil {
 		// session 创建逻辑应该在这里
 		session = NewSession(sessionId, senderId, c)
 		c.sessions[sessionId] = session
 	}
+	c.mu.Unlock()
 	// 握手状态相关的校验，全部后置
 	if session.in.err != nil {
 		return session.in.err
@@ -149,7 +164,8 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	handshakeComplete := session.isHandshakeComplete.Load()
 
 	// 校验结束，开始解密
-	data, err := session.in.decrypt(msg[11:])
+	header := msg[:recordHeaderLen]
+	data, err := session.in.decrypt(header, msg[recordHeaderLen:])
 	if err != nil {
 		return session.in.setErrorLocked(errors.New("decrypt failed"))
 	}
@@ -182,7 +198,9 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 			return errors.New("empty application data record")
 		}
 		// 将解密后的data 通过 readQueue 传递给上层
+		c.mu.Lock()
 		c.readQueue = append(c.readQueue, readMsgItem{sessionId: sessionId, remoteId: senderId, msgType: msgType, msg: data, err: err})
+		c.mu.Unlock()
 		return nil
 
 	// 处理 TLS 握手记录
@@ -190,7 +208,14 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		if len(data) == 0 || expectChangeCipherSpec {
 			return errors.New("alertUnexpectedMessage")
 		}
+		session.handMu.Lock()
 		session.hand = append(session.hand, data)
+		session.handMu.Unlock()
+		if !session.isHandshakeComplete.Load() && !session.handshakeInProgress.Load() {
+			if err := session.Handshake(); err != nil {
+				return err
+			}
+		}
 
 	case recordTypeChangeCipherSpec:
 		// todo : 扩展为可携带 sm2 的 cs 数据【感觉可以通过hand传递过去，然后在readFinished中处理】
@@ -224,35 +249,29 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 	}
 	sessionId := getSessionID(c.hostId, remoteId)
 
+	c.mu.Lock()
 	session := c.sessions[sessionId]
 	if session == nil {
 		// 初始化session
 		session = NewSession(sessionId, remoteId, c)
 		c.sessions[sessionId] = session
 	}
-	// 看起来在 write 这边握手操作是可以前置的，因为他在写操作之前就可以知道是要给谁发
-	// 从而获取到对应 session，但是这样的话和某个用户之间的首次通信就会是一个握手数据，而不是应用数据【没有漏一条应用数据进行握手触发的效果】
-	// 就会和 read 那边的逻辑对不上，所以还是需要漏一个应用数据的
-	// 所以 write 这边的握手触发也要后置，先 write 一条再说
-
-	// 三种数据类型：应用、握手、CCS，这里肯定是应用来的
-
-	err = c.writeRecordLocked(recordTypeApplicationData, message, session)
-	if err != nil {
-		return err
-	}
-
-	// 握手检查（握手确实要后置，但是session相关，即使是第一条消息，也会带session前缀所以session相关不后置）
+	c.mu.Unlock()
+	// 写入应用数据前先确保握手完成
 	if err := session.Handshake(); err != nil {
 		return err
 	}
-
 	if err := session.out.err; err != nil {
 		return err
 	}
-
 	if !session.isHandshakeComplete.Load() {
 		return errors.New("[Write] handshake not complete")
+	}
+
+	// 三种数据类型：应用、握手、CCS，这里肯定是应用来的
+	err = c.writeRecordLocked(recordTypeApplicationData, message, session)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -261,15 +280,17 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 // 与 readRecord 同理 writeRecord由于被应用层和握手层调用，所以应该是会有并发问题的（又好像没有）
 func (c *Conn) writeRecordLocked(typ recordType, data []byte, session *Session) error {
 	// writeRecordLocked 写入记录，这里的 type 只能是握手/应用/变更密码
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	if len(data) == 0 {
 		return errors.New("zero length write")
 	}
 
 	// 直接分配内存，避免 sync.Pool 不当使用导致的 panic 风险和代码复杂度
 	// 头部格式：[1字节类型][10字节HostID]
-	outBuf := make([]byte, 11)
+	outBuf := make([]byte, recordHeaderLen)
 	outBuf[0] = byte(typ)
-	copy(outBuf[1:11], c.hostId)
+	copy(outBuf[1:recordHeaderLen], c.hostId)
 
 	var err error
 	// encrypt 方法通常会将加密后的内容追加到 outBuf 后面
@@ -368,7 +389,7 @@ func parseReceivedMsg(msg []byte, compressor compressor.Compressor, encoder enco
 }
 
 func getSessionID(A, B string) SessionID {
-	if A < B {
+	if strings.Compare(A, B) < 0 {
 		return SessionID(A + "_" + B)
 	}
 	return SessionID(B + "_" + A)

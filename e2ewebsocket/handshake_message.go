@@ -49,11 +49,22 @@ func (m *helloMsg) marshal() ([]byte, error) {
 		})
 	}
 
+	// 扩展3 signatureAlgorithms
+	if len(m.supportedSignatureAlgorithms) > 0 {
+		exts.AddUint16(extensionSignatureAlgorithms)
+		exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
+			exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
+				for _, scheme := range m.supportedSignatureAlgorithms {
+					exts.AddUint16(uint16(scheme))
+				}
+			})
+		})
+	}
+
 	extBytes, err := exts.Bytes()
 	if err != nil {
 		return nil, err
 	}
-
 
 	// 构造hello消息主体
 	var b cryptobyte.Builder
@@ -63,6 +74,10 @@ func (m *helloMsg) marshal() ([]byte, error) {
 	b.AddUint8(typeHelloMsg)
 	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
 		// 2 代表版本号
+		if len(m.supportedVersions) == 0 {
+			b.SetError(fmt.Errorf("supportedVersions is empty"))
+			return
+		}
 		b.AddUint16(m.supportedVersions[0])
 		// 3 随机数
 		addBytesWithLength(b, m.random, 32)
@@ -95,9 +110,11 @@ func (m *helloMsg) unmarshal(data []byte) bool {
 	// 跳过 1消息类型(1字节)和长度(3字节)
 	// 读取 2代表版号(2字节)
 	// 读取 3随机数(32字节)
-	if !s.Skip(4) || !s.ReadUint16(&m.supportedVersions[0]) || !s.ReadBytes(&m.random, 32) {
+	var legacyVersion uint16
+	if !s.Skip(4) || !s.ReadUint16(&legacyVersion) || !s.ReadBytes(&m.random, 32) {
 		return false
 	}
+	m.supportedVersions = []uint16{legacyVersion}
 
 	// 读取 4密码套件(2字节长度和n个2字节套件列表)
 	var cipherSuites cryptobyte.String
@@ -165,12 +182,28 @@ func (m *helloMsg) unmarshal(data []byte) bool {
 			if !extData.ReadUint8LengthPrefixed(&versList) || versList.Empty() {
 				return false
 			}
+			var versions []uint16
 			for !versList.Empty() {
 				var vers uint16
 				if !versList.ReadUint16(&vers) {
 					return false
 				}
-				m.supportedVersions = append(m.supportedVersions, vers)
+				versions = append(versions, vers)
+			}
+			if len(versions) > 0 {
+				m.supportedVersions = versions
+			}
+		case extensionSignatureAlgorithms:
+			var sigs cryptobyte.String
+			if !extData.ReadUint16LengthPrefixed(&sigs) || sigs.Empty() {
+				return false
+			}
+			for !sigs.Empty() {
+				var sig uint16
+				if !sigs.ReadUint16(&sig) {
+					return false
+				}
+				m.supportedSignatureAlgorithms = append(m.supportedSignatureAlgorithms, SignatureScheme(sig))
 			}
 		default:
 			// Ignore unknown extensions.
@@ -251,22 +284,27 @@ func (m *keyExchangeMsg) marshal() ([]byte, error) {
 	return x, nil
 
 	// var b cryptobyte.Builder
-    // b.AddUint8(typeKeyExchange)
-    // b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-    //     b.AddBytes(m.key)
-    // })
-    // return b.Bytes()
+	// b.AddUint8(typeKeyExchange)
+	// b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+	//     b.AddBytes(m.key)
+	// })
+	// return b.Bytes()
 }
 
 func (m *keyExchangeMsg) unmarshal(data []byte) bool {
 	if len(data) < 4 {
 		return false
 	}
+	if data[0] != typeKeyExchange {
+		return false
+	}
+	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
+	if n != len(data)-4 {
+		return false
+	}
 	m.key = data[4:]
 	return true
 }
-
-
 
 type finishedMsg struct {
 	verifyData []byte
@@ -284,7 +322,9 @@ func (m *finishedMsg) marshal() ([]byte, error) {
 
 func (m *finishedMsg) unmarshal(data []byte) bool {
 	s := cryptobyte.String(data)
-	return s.Skip(1) &&
+	var typ uint8
+	return s.ReadUint8(&typ) &&
+		typ == typeFinished &&
 		readUint24LengthPrefixed(&s, &m.verifyData) &&
 		s.Empty()
 }
