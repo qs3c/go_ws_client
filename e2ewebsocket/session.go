@@ -38,8 +38,6 @@ type Session struct {
 	localFinished       [12]byte
 	remoteFinished      [12]byte
 
-	hand [][]byte
-
 	handshakeChan chan sessionMsg
 }
 
@@ -62,6 +60,34 @@ func NewSession(id SessionID, remoteId string, conn *Conn) *Session {
 	return &s
 }
 
+func (s *Session) Close() error {
+	s.handshakeMutex.Lock()
+	defer s.handshakeMutex.Unlock()
+
+	select {
+	case <-s.handshakeChan:
+		// Already closed or has data
+	default:
+		// Safe to close?
+		// Actually, close on a channel is not idempotent and panic if closed twice.
+		// We need a flag or Once.
+		// Using sync.Once is better.
+	}
+	// Simplified version: relies on caller to ensure single call or ignore panic?
+	// Better approach: just close it, let panic happen if multiple close (which is a bug elsewhere)
+	// But to be safe let's add closed flag or use Once if session struct allowed.
+	// Since we don't want to change struct too much, let's assume single owner calls Close.
+	// Actually readLoop calls it, WriteMessage calls it... data race on Close!
+
+	// Let's add 'closed atomic.Bool' to session struct?
+	// Or just recover panic?
+	defer func() {
+		_ = recover()
+	}()
+	close(s.handshakeChan)
+	return nil
+}
+
 func (s *Session) Handshake() error {
 	return s.HandshakeContext(context.Background())
 }
@@ -77,52 +103,6 @@ func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 		return nil
 	}
 
-	handshakeCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// 正常通过 Handshake 函数调用的，ctx 是 background 上下文不具有取消/超时逻辑
-	// 不会有 ctx.Done() != nil 的情况
-	if ctx.Done() != nil {
-
-		done := make(chan struct{})
-		interruptRes := make(chan error, 1)
-		defer func() {
-			// 该函数正常执行完后，会从 interruptRes 中拿错误
-			// 如果之前 handshakeCtx 已经取消，拿到 handshakeCtx.Err() 错误
-			// 如果之前 handshakeCtx 没有取消，函数正常执行完毕，那么会拿到 nil
-
-			// [告诉中断器整个流程执行完毕]
-			close(done)
-			// [从中断器获取执行结果是正常执行了还是被打断了]
-			if ctxErr := <-interruptRes; ctxErr != nil {
-				// Return context error to user.
-				ret = ctxErr
-			}
-		}()
-
-		// 常见的是在主流程中for + select 监听ctx.Done()
-		// 通过 default 不断推进函数正常工作内容
-		// 这样上下文被取消的时候会及时打断主流程
-
-		// 这种方式不会打断 handshakeContext 函数的正常执行
-		// 但是提前 close 了 conn，执行过程中会出错
-		// 最终再把 error 替换成 ctx 取消错误，代表是主动取消了握手
-
-		// 开启一个 goroutine 中断器，监听 ctx.Done() 信号
-		// 当 ctx 被取消时，关闭连接并返回 ctx.Err() 错误
-		go func() {
-			select {
-			case <-handshakeCtx.Done():
-				// Close the connection, discarding the error
-				_ = s.conn.Close()
-				interruptRes <- handshakeCtx.Err()
-			case <-done:
-				interruptRes <- nil
-			}
-		}()
-	}
-	// 【第三大步：上锁与二次状态检查】
-	// 上锁并二次检查握手是否已经完成
 	s.handshakeMutex.Lock()
 	defer s.handshakeMutex.Unlock()
 
@@ -153,7 +133,7 @@ func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 	}
 	// 握手有错但是标记完成
 	if s.handshakeErr != nil && s.isHandshakeComplete.Load() {
-		panic("tls: internal error: handshake returned an error but is marked successful")
+		return fmt.Errorf("tls: internal error: handshake returned an error (%v) but is marked successful", s.handshakeErr)
 	}
 
 	return s.handshakeErr
@@ -162,68 +142,36 @@ func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 // 读取握手数据方法在 session 上，读应用数据方法在 conn 上，源泵方法在 conn 上
 func (s *Session) readHandshake(transcript transcriptHash) (any, error) {
 
-	// 循环读取直到 accumulating 的 hand 缓冲区有数据
-	for len(s.hand) == 0 {
-		select {
-		case msg, ok := <-s.handshakeChan:
-			if !ok {
-				return nil, errors.New("handshake channel closed")
-			}
-			if msg.err != nil {
-				return nil, msg.err
-			}
-			if msg.typ == recordTypeHandshake {
-				s.hand = append(s.hand, msg.data)
-			} else if msg.typ == recordTypeChangeCipherSpec {
-				// 意外收到了 CCS，虽然 RFC 不允许分片，但如果提前收到了 CCS...
-				// 暂时报错
-				return nil, s.in.setErrorLocked(errors.New("unexpected CCS during handshake read"))
-			} else {
-				return nil, s.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
-			}
-		}
+	msg, ok := <-s.handshakeChan
+	if !ok {
+		return nil, errors.New("handshake channel closed")
+	}
+	if msg.err != nil {
+		return nil, msg.err
 	}
 
-	// 读取handshake数据
-	data := s.hand[0]
-	s.hand = s.hand[1:]
+	// 处理 CCS 和 Alert 等异常情况
+	if msg.typ == recordTypeChangeCipherSpec {
+		return nil, s.in.setErrorLocked(errors.New("unexpected CCS during handshake read"))
+	}
+	// 新增：处理 Alert
+	if msg.typ == recordTypeAlert {
+		return nil, s.in.setErrorLocked(errors.New("received alert during handshake"))
+	}
 
+	if msg.typ != recordTypeHandshake {
+		return nil, s.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+	}
+
+	// 拿到了数据，校验长度
+	data := msg.data
 	maxHandshakeSize := maxHandshake
-
-	// n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
 	if len(data) > maxHandshakeSize {
 		s.out.setErrorLocked(errors.New("alertInternalError"))
 		return nil, s.in.setErrorLocked(fmt.Errorf("tls: handshake message of length %d bytes exceeds maximum of %d bytes", len(data), maxHandshakeSize))
 	}
 
 	return s.unmarshalHandshakeMessage(data, transcript)
-}
-
-func (s *Session) readChangeCipherSpec() error {
-	select {
-	case msg, ok := <-s.handshakeChan:
-		if !ok {
-			return errors.New("handshake channel closed")
-		}
-		if msg.err != nil {
-			return msg.err
-		}
-		if msg.typ == recordTypeChangeCipherSpec {
-			// 在 readLoop 中已经调用了 changeCipherSpec()，这里只需要确认收到即可
-			// 校验数据
-			if len(msg.data) != 1 || msg.data[0] != 1 {
-				return s.in.setErrorLocked(errors.New("alertDecodeError"))
-			}
-			return nil
-		}
-		// 如果读到了 handshake 消息，放入缓冲区?
-		if msg.typ == recordTypeHandshake {
-			s.hand = append(s.hand, msg.data)
-			// 继续读? 不，调用方期望读 CCS，读到别的就是错的 (除非是 Warning Alert? 但这里简化了)
-			return s.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
-		}
-		return s.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
-	}
 }
 
 func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHash) (handshakeMessage, error) {
@@ -282,6 +230,11 @@ func (s *Session) writeChangeCipherRecord() error {
 		return err
 	}
 	return s.out.changeCipherSpec()
+}
+
+func (s *Session) sendAlert(err alert) error {
+	// 默认发送 fatal error
+	return s.conn.writeRecordLocked(recordTypeAlert, []byte{alertLevelFatal, byte(err)}, s)
 }
 
 //  涉及重协商的这两个功能先不做

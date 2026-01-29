@@ -24,6 +24,9 @@ type Conn struct {
 	sessionsMu sync.RWMutex
 	sessions   map[SessionID]*Session
 
+	// 保护底层 WebSocket 写操作的锁
+	writeMu sync.Mutex
+
 	// 握手状态相关
 	// vers                uint16
 	// cipherSuite         uint16
@@ -144,9 +147,19 @@ func (c *Conn) readLoop() {
 		data, err := session.in.decrypt(msg[11:])
 		if err != nil {
 			log.Printf("readLoop decrypt error: %v", err)
+			// 给对方发送 Fatal Alert
+			_ = session.sendAlert(alertBadRecordMAC)
 			session.in.setErrorLocked(errors.New("decrypt failed"))
-			c.msgChan <- readMsgItem{err: err}
-			return
+
+			// 移除 Session
+			session.Close()
+			c.sessionsMu.Lock()
+			delete(c.sessions, sessionId)
+			c.sessionsMu.Unlock()
+
+			// 忽略错误，等待下次通信自动重建
+			// c.msgChan <- readMsgItem{err: err}
+			continue
 		}
 
 		// 处理不同类型的TLS记录
@@ -217,6 +230,19 @@ func (c *Conn) readLoop() {
 				c.msgChan <- readMsgItem{err: errors.New("handshake channel blocked on CCS")}
 				return
 			}
+
+		case recordTypeAlert:
+			if len(data) < 2 {
+				// c.msgChan <- readMsgItem{err: errors.New("alert message too short")}
+				continue
+			}
+			log.Printf("readLoop received alert: level=%d, desc=%d from %s", data[0], data[1], senderId)
+			// 收到 Alert，直接销毁本地 Session
+			session.Close()
+			c.sessionsMu.Lock()
+			delete(c.sessions, sessionId)
+			c.sessionsMu.Unlock()
+			continue
 		}
 	}
 }
@@ -233,6 +259,14 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 
 	c.sessionsMu.Lock()
 	session := c.sessions[sessionId]
+	// 惰性重建：如果 session 存在但已损坏，销毁并重建
+	if session != nil && session.out.err != nil {
+		log.Printf("Session %s is broken (err: %v), discarding and creating new one", sessionId, session.out.err)
+		session.Close()
+		delete(c.sessions, sessionId)
+		session = nil
+	}
+
 	if session == nil {
 		// 初始化session
 		session = NewSession(sessionId, remoteId, c)
@@ -295,6 +329,9 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte, session *Session) 
 	if err != nil {
 		return err
 	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	err = c.conn.WriteMessage(websocket.BinaryMessage, outBuf)
 	if err != nil {
 		return err
