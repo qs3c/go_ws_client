@@ -393,13 +393,10 @@ func (hs *handshakeState) sendFinished(out []byte) error {
 func (hs *handshakeState) readFinished(out []byte) error {
 	s := hs.s
 
-	if err := s.conn.readChangeCipherSpec(); err != nil {
-		return err
-	}
+	// if err := s.conn.readChangeCipherSpec(); err != nil {
+	// 	return err
+	// }
 
-	// finishedMsg is included in the transcript, but not until after we
-	// check the client version, since the state before this message was
-	// sent is used during verification.
 	msg, err := s.readHandshake(nil)
 	if err != nil {
 		return err

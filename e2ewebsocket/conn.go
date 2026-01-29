@@ -9,12 +9,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var cmp = compressor.NewGzipCompressor()
+var ecd = encoder.NewGobEncoder()
+
 type Conn struct {
 	conn *websocket.Conn
 	hostId string
 	config *Config
 	sessions sync.Map
 	msgChan chan readMsgItem
+
+	parseReceivedMsg func([]byte) (string, error)
+	writeMu sync.Mutex
 }
 
 func NewSecureConn(wsconn *websocket.Conn hostId string, config *Config) (*Conn, error) {
@@ -61,7 +67,6 @@ func (c *Conn) readLoop() {
 	}
 	
 }
-
 
 func (c *Conn) readRecord(){
 	msgType, msg, err := c.conn.ReadMessage()
@@ -121,7 +126,17 @@ func (c *Conn) readRecord(){
 		session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
 		// c.msgChan <- readMsgItem{err: errors.New("alertUnexpectedMessage")}
 		return
-	
+	// 收到来自 A 的 session 销毁通知
+	case recordTypeAlert:
+		if len(data) < 2 {
+			// c.msgChan <- readMsgItem{err: errors.New("alert message too short")}
+			log.Printf("收到不合法的Alert消息，长度小于2")
+			return
+		}
+		log.Printf("readLoop received alert: level=%d, desc=%d from %s", data[0], data[1], senderId)
+		// 收到 Alert，直接销毁本地 Session
+		c.sessions.Delete(sessionId)
+		return
 	// 收到来自 A 的应用数据记录
 	case recordTypeApplicationData:
 		// #############handshake 是异步的 这里的话很有可能没完成啊！
@@ -180,17 +195,182 @@ func (c *Conn) readRecord(){
 			// c.msgChan <- readMsgItem{err: errors.New("change cipher failed!")}
 			return
 		}
-
-		// ###################通知 Session CCS 已收到【为啥要通知？？】
-		select {
-		case session.handshakeChan <- sessionMsg{typ: recordTypeChangeCipherSpec, data: data}:
-		default:
-			log.Printf("readLoop handshake channel blocked on CCS for session %s", session.id)
-			// c.msgChan <- readMsgItem{err: errors.New("handshake channel blocked on CCS")}
-			return
-		}	
 	}
 
 }
 
+func (c *Conn) ReadMessage() (int, []byte, error) {
+	item, ok := <-c.msgChan
+	if !ok {
+		return 0, nil, errors.New("connection closed")
+	}
+	return item.msgType, item.msg, item.err
+}
 
+func (c *Conn) WriteMessage(messageType int, message []byte) error {
+
+	// 似乎这里必须要写一段拆包逻辑来获取 receiveId 或者说 remoteId
+	// 和服务端的拆包逻辑相同，和模拟客户端的打包逻辑相反
+	var remoteId string
+	var err error
+	if c.parseReceivedMsg == nil {
+		remoteId, err = c.parseReceivedMsgOPENIM(message)
+		if err != nil {
+			return err
+		}
+	} else {
+		remoteId, err = c.parseReceivedMsg(message)
+		if err != nil {
+			return err
+		}
+	}
+	
+	sessionId := getSessionID(c.hostId, remoteId)
+
+	var session *Session
+	if val, ok := c.sessions.Load(sessionId); ok {
+		session = val.(*Session)
+	}
+
+	// ##################惰性重建：如果 session 存在但已损坏，销毁并重建，这个不是很惰性其实
+	if session != nil && session.out.err != nil {
+		log.Printf("Session %s is broken (err: %v), discarding and creating new one", sessionId, session.out.err)
+		c.sessions.Delete(sessionId)
+		session = nil
+	}
+
+	if session == nil {
+		// 初始化session
+		session = NewSession(sessionId, remoteId, c)
+		actual, _ := c.sessions.LoadOrStore(sessionId, session)
+		session = actual.(*Session)
+	}
+
+	// 握手
+	// 似乎不需要后置握手了
+	if err := session.Handshake(); err != nil {
+		return err
+	}
+
+	// 握手检查
+	if err := session.out.err; err != nil {
+		return err
+	}
+
+	if !session.isHandshakeComplete.Load() {
+		return errors.New("[Write] handshake not complete")
+	}
+
+	err = c.writeRecordLocked(recordTypeApplicationData, message, session)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Conn) writeRecordLocked(typ recordType, data []byte, session *Session) error {
+	if len(data) == 0 {
+		return errors.New("zero length write")
+	}
+
+	// 构造头部
+	// ################# 这里太 openim 了，后面看看怎么弄
+	outBuf := make([]byte, 11)
+	outBuf[0] = byte(typ)
+	copy(outBuf[1:11], c.hostId)
+
+	// 加密
+	var err error
+	outBuf, err = session.out.encrypt(outBuf, data, c.config.rand())
+	if err != nil {
+		return err
+	}
+
+	// 发送
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	err = c.conn.WriteMessage(websocket.BinaryMessage, outBuf)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Conn) Close() error {
+	return c.conn.Close()
+}
+
+func (c *Conn) SetReadDeadline(timeout time.Duration) error {
+	return c.conn.SetReadDeadline(time.Now().Add(timeout))
+}
+
+func (c *Conn) SetWriteDeadline(timeout time.Duration) error {
+	return c.conn.SetWriteDeadline(time.Now().Add(timeout))
+}
+
+func (c *Conn) SetReadLimit(limit int64) {
+	c.conn.SetReadLimit(limit)
+
+}
+
+func (c *Conn) SetPingHandler(handler PingPongHandler) {
+	c.conn.SetPingHandler(handler)
+}
+
+func (c *Conn) SetPongHandler(handler PingPongHandler) {
+	c.conn.SetPongHandler(handler)
+}
+
+func (c *Conn) LocalAddr() string {
+	return c.conn.LocalAddr().String()
+}
+
+func (c *Conn) Dial(urlStr string, requestHeader http.Header) (*http.Response, error) {
+	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
+	if err == nil {
+		c.conn = conn
+	}
+	return httpResp, err
+}
+
+func (c *Conn) IsNil() bool {
+	if c.conn != nil {
+		return false
+	}
+	return true
+}
+
+func parseReceivedMsgOPENIM(msg []byte) (string, error) {
+
+	// 解压
+	decompressMsg, err := cmp.DecompressWithPool(msg)
+	if err != nil {
+		log.Printf("解压消息失败: %v", err)
+		return "", err
+	}
+
+	// 解码
+	var req Req
+	err = ecd.Decode(decompressMsg, &req)
+	if err != nil {
+		log.Printf("解码消息失败: %v", err)
+		return "", err
+	}
+
+	// 反序列化
+	var msgData sdkws.MsgData
+	if err := proto.Unmarshal(req.Data, &msgData); err != nil {
+		return "", err
+	}
+	
+	return msgData.RecvID, nil
+}
+
+func getSessionID(A, B string) SessionID {
+	if A < B {
+		return SessionID(A + "_" + B)
+	}
+	return SessionID(B + "_" + A)
+}
