@@ -2,3 +2,9 @@
 /third_party/tongsuo-build/
 /third_party/tongsuo-build*/
 /third_party/tongsuo-install/
+
+# sm2keyexch build artifacts
+crypto/sm2keyexch/*.lib
+crypto/sm2keyexch/*.obj
+crypto/sm2keyexch/*.a
+crypto/sm2keyexch/*.o

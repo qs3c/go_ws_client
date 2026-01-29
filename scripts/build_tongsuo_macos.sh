@@ -24,3 +24,10 @@ cd "$BUILD"
 "$SRC/config" --prefix="$PREFIX" $CONFIG_OPTS
 make -j"$JOBS"
 make $INSTALL_TARGETS
+
+echo "Building sm2keyexch..."
+clang -c -fPIC "$ROOT/crypto/sm2keyexch/keyexchange.c" -o "$ROOT/crypto/sm2keyexch/keyexchange.o" \
+    -I"$PREFIX/include" -I"$SRC/include" -DOPENSSL_API_COMPAT=0x10100000L
+ar rcs "$ROOT/crypto/sm2keyexch/libkeyexchange.a" "$ROOT/crypto/sm2keyexch/keyexchange.o"
+rm "$ROOT/crypto/sm2keyexch/keyexchange.o"
+echo "Built $ROOT/crypto/sm2keyexch/libkeyexchange.a"
