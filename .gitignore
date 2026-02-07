@@ -2,5 +2,9 @@
 /third_party/tongsuo-build/
 /third_party/tongsuo-build*/
 /third_party/tongsuo-install/
+
+# Build artifacts
 *.o
 *.a
+*.lib
+*.obj

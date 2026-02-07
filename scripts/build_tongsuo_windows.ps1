@@ -173,4 +173,45 @@ finally {
   Pop-Location
 }
 
-Write-Host "Build complete. Install prefix: $Prefix"
+Write-Host "Building sm2keyexch..."
+$keyExDir = Join-Path $repoRoot "crypto\sm2keyexch"
+Push-Location $keyExDir
+try {
+  $inc1 = Join-Path $Prefix "include"
+  $inc2 = Join-Path $SourceDir "include"
+  
+  & cl /c /O2 /nologo /DOPENSSL_API_COMPAT=0x10100000L /I"$inc1" /I"$inc2" keyexchange.c
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  
+  & lib /nologo /out:keyexchange.lib keyexchange.obj
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  
+    Write-Host "Built $(Join-Path $keyExDir 'keyexchange.lib')"
+  
+  }
+  
+  finally {
+  
+    Pop-Location
+  
+  }
+  
+  
+  
+  Write-Host "Build complete. Install prefix: $Prefix"
+  
+  
+  
+  # Automatically trigger environment setup for the current session
+  
+  $envScript = Join-Path $scriptDir "set_tongsuo_env.ps1"
+  
+  if (Test-Path $envScript) {
+  
+      Write-Host "Automatically setting up runtime environment..." -ForegroundColor Cyan
+  
+      & $envScript
+  
+  }
+  
+  
