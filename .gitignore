@@ -2,3 +2,5 @@
 /third_party/tongsuo-build/
 /third_party/tongsuo-build*/
 /third_party/tongsuo-install/
+*.o
+*.a
