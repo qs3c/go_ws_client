@@ -14,13 +14,10 @@ if [[ ! -d "$TONGSUO_HOME" ]]; then
   return 1 2>/dev/null || exit 1
 fi
 
-LIBDIR="$TONGSUO_HOME/lib"
-if [[ ! -d "$LIBDIR" ]]; then
-  LIBDIR="$TONGSUO_HOME"
-fi
+BINDIR="$TONGSUO_HOME/bin"
 
 export TONGSUO_HOME
-export DYLD_LIBRARY_PATH="$LIBDIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+export PATH="$BINDIR:$PATH"
 
 echo "TONGSUO_HOME set to $TONGSUO_HOME"
-echo "DYLD_LIBRARY_PATH updated with $LIBDIR"
+echo "PATH updated with $BINDIR"

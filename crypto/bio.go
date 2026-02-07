@@ -9,7 +9,6 @@ package crypto
 #include <openssl/pem.h>
 #include <openssl/bn.h>
 #include <stdlib.h>
-
 */
 import "C"
 

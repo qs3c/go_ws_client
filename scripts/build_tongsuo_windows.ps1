@@ -186,10 +186,32 @@ try {
   & lib /nologo /out:keyexchange.lib keyexchange.obj
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   
-  Write-Host "Built $(Join-Path $keyExDir 'keyexchange.lib')"
-}
-finally {
-  Pop-Location
-}
-
-Write-Host "Build complete. Install prefix: $Prefix"
+    Write-Host "Built $(Join-Path $keyExDir 'keyexchange.lib')"
+  
+  }
+  
+  finally {
+  
+    Pop-Location
+  
+  }
+  
+  
+  
+  Write-Host "Build complete. Install prefix: $Prefix"
+  
+  
+  
+  # Automatically trigger environment setup for the current session
+  
+  $envScript = Join-Path $scriptDir "set_tongsuo_env.ps1"
+  
+  if (Test-Path $envScript) {
+  
+      Write-Host "Automatically setting up runtime environment..." -ForegroundColor Cyan
+  
+      & $envScript
+  
+  }
+  
+  
