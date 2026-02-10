@@ -44,19 +44,25 @@ type Session struct {
 	remoteFinished      [12]byte
 
 	handshakeChan chan sessionMsg
+
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewSession(id SessionID, remoteId string, conn *Conn) *Session {
-	s := Session{
+	s := &Session{
 		id:            id,
 		remoteId:      remoteId,
 		conn:          conn,
 		handshakeChan: make(chan sessionMsg, 16),
+		done:          make(chan struct{}),
 	}
+	s.in.session = s
+	s.out.session = s
 	s.in.cond = sync.NewCond(&s.in)
 	s.out.cond = sync.NewCond(&s.out)
 	s.handshakeFn = s.symHandshake
-	return &s
+	return s
 }
 
 func (s *Session) Handshake() error {
@@ -102,20 +108,34 @@ func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 	return s.handshakeErr
 }
 
+func (s *Session) Close() {
+	s.closeOnce.Do(func() {
+		close(s.done)
+		// 唤醒所有等待者，让它们有机会检查 done channel 并退出
+		s.in.cond.Broadcast()
+		s.out.cond.Broadcast()
+	})
+}
+
 func (s *Session) readHandshake(transcript transcriptHash) (any, error) {
 
 	// ################## 什么情况导致close，close了应该怎么办
-	msg, ok := <-s.handshakeChan
-	if !ok {
-		return nil, errors.New("handshake channel closed")
+	var msg sessionMsg
+	var ok bool
+	select {
+	case msg, ok = <-s.handshakeChan:
+		if !ok {
+			return nil, errors.New("handshake channel closed")
+		}
+	case <-s.done:
+		return nil, errors.New("session closed")
 	}
 
 	// 校验数据长度
 	data := msg.data
 	maxHandshakeSize := maxHandshake
 	if len(data) > maxHandshakeSize {
-		s.out.setErrorLocked(errors.New("alertInternalError"))
-		return nil, s.in.setErrorLocked(fmt.Errorf("handshake message of length %d bytes exceeds maximum of %d bytes", len(data), maxHandshakeSize))
+		return nil, fmt.Errorf("handshake message of length %d bytes exceeds maximum of %d bytes", len(data), maxHandshakeSize)
 	}
 
 	return s.unmarshalHandshakeMessage(data, transcript)
@@ -139,7 +159,8 @@ func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHa
 	case typeFinished:
 		m = new(finishedMsg)
 	default:
-		return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
+		// return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
+		return nil, errors.New("alertUnexpectedMessage")
 	}
 
 	// 因为这里的原 data 其实来自 hand 缓冲区，所以为了不破坏 hand 缓冲区
@@ -147,7 +168,8 @@ func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHa
 	// data = append([]byte(nil), data...)
 
 	if !m.unmarshal(data) {
-		return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
+		// return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
+		return nil, errors.New("alertUnexpectedMessage")
 	}
 
 	if transcript != nil {
@@ -192,6 +214,9 @@ type halfConn struct {
 	nextMac    hash.Hash // next MAC algorithm
 	// ########### cond 很重要，对称握手特有的竞态问题
 	cond *sync.Cond
+
+	// Fields added for session simplification
+	session *Session
 }
 
 // ++++++++++++++++++++++++待改++++++++++++++++++++++++++++++
@@ -350,17 +375,24 @@ func (hc *halfConn) changeCipherSpec() error {
 	// cipher 是一个既包含了密码套件类型（用什么算法）
 	// 也包含了密钥、随机值的东西，所以即使每次都用相同的算法
 	// 但是密钥、随机值是不一样的，cipher 也不一样
-	for hc.nextCipher == nil && hc.err == nil {
-		if hc.cond != nil {
-			hc.cond.Wait()
-		} else {
-			break
+	// 等待直到下一个 cipher 准备好，或者 session 被关闭
+	for hc.nextCipher == nil {
+		// 检查是否 session 已关闭
+		select {
+		case <-hc.session.done:
+			return errors.New("session closed")
+		default:
 		}
+		hc.cond.Wait()
 	}
-	// ######### 什么操作会在 CCS 之前失败了？
-	if hc.err != nil {
-		return hc.err
+
+	// 再次检查 session 是否关闭 (防止唤醒是因为 Close 导致的)
+	select {
+	case <-hc.session.done:
+		return errors.New("session closed")
+	default:
 	}
+
 	if hc.nextCipher == nil {
 		return errors.New("alertInternalError")
 	}
@@ -419,19 +451,3 @@ func (e *permanentError) Error() string   { return e.err.Error() }
 func (e *permanentError) Unwrap() error   { return e.err }
 func (e *permanentError) Timeout() bool   { return e.err.Timeout() }
 func (e *permanentError) Temporary() bool { return false }
-
-func (hc *halfConn) setErrorLocked(err error) error {
-	// 保护对半连接 err 字段的修改
-	hc.Lock()
-	defer hc.Unlock()
-	if e, ok := err.(net.Error); ok {
-		hc.err = &permanentError{err: e}
-	} else {
-		hc.err = err
-	}
-	// 半连接挂了通知所有 cond.Wait 的地方
-	if hc.cond != nil {
-		hc.cond.Broadcast()
-	}
-	return hc.err
-}

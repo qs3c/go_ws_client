@@ -4,52 +4,56 @@ import (
 	"bytes"
 	"errors"
 	"log"
+	"net/http"
 	"sync"
+	"time"
 
+	"github.com/albert/ws_client/compressor"
+	"github.com/albert/ws_client/encoder"
 	"github.com/gorilla/websocket"
+	"github.com/openimsdk/protocol/sdkws"
+	"google.golang.org/protobuf/proto"
 )
 
 var cmp = compressor.NewGzipCompressor()
 var ecd = encoder.NewGobEncoder()
 
 type Conn struct {
-	conn *websocket.Conn
-	hostId string
-	config *Config
+	conn     *websocket.Conn
+	hostId   string
+	config   *Config
 	sessions sync.Map
-	msgChan chan readMsgItem
+	msgChan  chan readMsgItem
 
 	parseReceivedMsg func([]byte) (string, error)
-	writeMu sync.Mutex
+	writeMu          sync.Mutex
 }
 
-func NewSecureConn(wsconn *websocket.Conn hostId string, config *Config) (*Conn, error) {
+func NewSecureConn(wsconn *websocket.Conn, hostId string, config *Config) (*Conn, error) {
 	c := &Conn{
-		conn: wsconn,
-		hostId: hostId,
-		config: config,
+		conn:    wsconn,
+		hostId:  hostId,
+		config:  config,
 		msgChan: make(chan readMsgItem, 128),
-	}	
+	}
 	go c.readLoop()
 	return c, nil
 }
 
-
-
-type readMsgItem struct{
+type readMsgItem struct {
 	sessionId SessionID
 	// ######## remoteId 可能没用
-	remoteId  string
+	remoteId string
 	// 基础消息
-	msgType   int
-	msg       []byte
-	err       error
+	msgType int
+	msg     []byte
+	err     error
 }
 
 func (c *Conn) readLoop() {
-	defer func(){
-		if r:=recover();r!=nil{
-		log.Printf("readLoop panic: %v", r)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("readLoop panic: %v", r)
 		}
 		// 关闭所有 session 的握手消息通道
 		c.sessions.Range(func(key, value any) bool {
@@ -65,18 +69,17 @@ func (c *Conn) readLoop() {
 	for {
 		c.readRecord()
 	}
-	
+
 }
 
-func (c *Conn) readRecord(){
+func (c *Conn) readRecord() {
 	msgType, msg, err := c.conn.ReadMessage()
 	if err != nil {
 		log.Printf("readLoop ReadMessage error: %v", err)
 		c.msgChan <- readMsgItem{err: err}
-		// 这里要return 还是 continue
 		return
 	}
-	
+
 	// 如果不是二进制类型的，正常传递给上层
 	if msgType != websocket.BinaryMessage {
 		c.msgChan <- readMsgItem{msgType: msgType, msg: msg}
@@ -101,11 +104,12 @@ func (c *Conn) readRecord(){
 	}
 
 	// 握手状态校验
-	if session.in.err != nil {
-		log.Printf("readLoop session error: %v", session.in.err)
-		// c.msgChan <- readMsgItem{err: session.in.err}
-		return
-	}
+	// ===============【如果在这里才发现之前的连接已经坏掉了岂不是浪费了一条数据呢？早就应该发现并且出发session自愈了吧】
+	// if err := session.Err(); err != nil {
+	// 	// Log and trigger rebuild
+	// 	session = c.rebuildSession(session, err)
+	// 	// Retry with new session (session is now the new instance)
+	// }
 
 	handshakeComplete := session.isHandshakeComplete.Load()
 
@@ -114,16 +118,17 @@ func (c *Conn) readRecord(){
 	if err != nil {
 		log.Printf("readLoop decrypt error: %v", err)
 		// 这个是否合适，一次和 A 之间的解密失败，你和 A 似乎就永别了
-		session.in.setErrorLocked(errors.New("decrypt failed"))
+		// ====================【设置永久错误和触发session自愈之间有gap，是否应该立即触发自愈而不是设置错误呢？】
+		c.terminateSession(session, err)
 		// c.msgChan <- readMsgItem{err: err}
 		return
 	}
 
-    switch typ {
+	switch typ {
 	default:
 		// 收到来自A的诡异消息，可能是被攻击了，也是永久关闭和A的通信了
 		log.Printf("readLoop unexpected message type: %d", typ)
-		session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		c.terminateSession(session, errors.New("alertUnexpectedMessage"))
 		// c.msgChan <- readMsgItem{err: errors.New("alertUnexpectedMessage")}
 		return
 	// 收到来自 A 的 session 销毁通知
@@ -135,7 +140,8 @@ func (c *Conn) readRecord(){
 		}
 		log.Printf("readLoop received alert: level=%d, desc=%d from %s", data[0], data[1], senderId)
 		// 收到 Alert，直接销毁本地 Session
-		c.sessions.Delete(sessionId)
+		// session.SetError(errors.New("received alert"))
+		c.terminateSession(session, errors.New("received alert"))
 		return
 	// 收到来自 A 的应用数据记录
 	case recordTypeApplicationData:
@@ -144,8 +150,8 @@ func (c *Conn) readRecord(){
 		// 如果是新 session 也就是第一条和A通信的应用消息，那么没有完成握手也是合法的！
 		// 特殊情况：握手太慢，第二条来的有太快了，来了还没握好，怎么办，直接永久错误？
 		if !handshakeComplete && loaded {
-			log.Printf("readLoop unexpected AppData: handshakeComplete=%v, expectedCCS=%v", handshakeComplete, expected)
-			session.in.setErrorLocked(errors.New("alertUnexpectedMessage"))
+			log.Printf("readLoop unexpected AppData: handshakeComplete=%v", handshakeComplete)
+			c.terminateSession(session, errors.New("alertUnexpectedMessage"))
 			// c.msgChan <- readMsgItem{err: errors.New("alertUnexpectedMessage")}
 			return
 		}
@@ -183,7 +189,7 @@ func (c *Conn) readRecord(){
 	case recordTypeChangeCipherSpec:
 		// CCS 消息检查
 		if len(data) != 1 || data[0] != 1 {
-			session.in.setErrorLocked(errors.New("alertDecodeError"))
+			c.terminateSession(session, errors.New("alertDecodeError"))
 			// c.msgChan <- readMsgItem{err: errors.New("alertDecodeError")}
 			return
 		}
@@ -191,7 +197,7 @@ func (c *Conn) readRecord(){
 		// 变更 in 的密码套件
 		if err := session.in.changeCipherSpec(); err != nil {
 			log.Printf("readLoop changeCipherSpec error: %v", err)
-			session.in.setErrorLocked(errors.New("change cipher failed!"))
+			c.terminateSession(session, errors.New("change cipher failed!"))
 			// c.msgChan <- readMsgItem{err: errors.New("change cipher failed!")}
 			return
 		}
@@ -214,7 +220,7 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 	var remoteId string
 	var err error
 	if c.parseReceivedMsg == nil {
-		remoteId, err = c.parseReceivedMsgOPENIM(message)
+		remoteId, err = parseReceivedMsgOPENIM(message)
 		if err != nil {
 			return err
 		}
@@ -224,7 +230,7 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 			return err
 		}
 	}
-	
+
 	sessionId := getSessionID(c.hostId, remoteId)
 
 	var session *Session
@@ -233,11 +239,11 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 	}
 
 	// ##################惰性重建：如果 session 存在但已损坏，销毁并重建，这个不是很惰性其实
-	if session != nil && session.out.err != nil {
-		log.Printf("Session %s is broken (err: %v), discarding and creating new one", sessionId, session.out.err)
-		c.sessions.Delete(sessionId)
-		session = nil
-	}
+	// if session != nil && session.Err() != nil {
+	// 	log.Printf("Session %s is broken (err: %v), discarding and creating new one", sessionId, session.Err())
+	// 	c.terminateSession(session, session.Err())
+	// 	session = nil
+	// }
 
 	if session == nil {
 		// 初始化session
@@ -249,13 +255,14 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 	// 握手
 	// 似乎不需要后置握手了
 	if err := session.Handshake(); err != nil {
+		c.terminateSession(session, err)
 		return err
 	}
 
 	// 握手检查
-	if err := session.out.err; err != nil {
-		return err
-	}
+	// if err := session.Err(); err != nil {
+	// 	return err
+	// }
 
 	if !session.isHandshakeComplete.Load() {
 		return errors.New("[Write] handshake not complete")
@@ -263,6 +270,9 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 
 	err = c.writeRecordLocked(recordTypeApplicationData, message, session)
 	if err != nil {
+		// 这个错误似乎与session无关，session是健康的，需要把session干掉吗？
+		// ####################
+		// c.terminateSession(session, err)
 		return err
 	}
 
@@ -284,6 +294,7 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte, session *Session) 
 	var err error
 	outBuf, err = session.out.encrypt(outBuf, data, c.config.rand())
 	if err != nil {
+		// session.SetError(err)
 		return err
 	}
 
@@ -364,7 +375,7 @@ func parseReceivedMsgOPENIM(msg []byte) (string, error) {
 	if err := proto.Unmarshal(req.Data, &msgData); err != nil {
 		return "", err
 	}
-	
+
 	return msgData.RecvID, nil
 }
 
@@ -374,3 +385,59 @@ func getSessionID(A, B string) SessionID {
 	}
 	return SessionID(B + "_" + A)
 }
+
+// 终止session
+func (c *Conn) terminateSession(session *Session, reason error) {
+	if session == nil {
+		return
+	}
+
+	// 0. Try to notify peer (Best Effort)
+	// AlertLevel: 2 (Fatal), AlertDescription: 80 (Internal Error)
+	// 即使发送失败也不影响后续重建
+	// 注意防止递归：writeRecordLocked 内部如果出错不要再调 terminateSession
+	// 所以这里如果 session 已经坏了，writeRecordLocked 可能会失败并返回错误，
+	// 但是 terminateSession 只管 close，不管 writeRecordLocked 的死活
+	// 实际上 writeRecordLocked 需要 session，如果 session 被 close 了，encryption 可能会失败
+	// 但此时还没 close，所以尝试发送
+	_ = c.writeRecordLocked(recordTypeAlert, []byte{2, 80}, session)
+
+	// 2. 清理资源 (Close channels, wake up blocked goroutines)
+	session.Close() // SetError calls Close
+
+	// 3. 从映射表移除 (Remove from map)
+	c.sessions.Delete(session.id)
+
+	log.Printf("Session %s terminated: %v", session.id, reason)
+}
+
+// 重建session，自愈逻辑
+// func (c *Conn) rebuildSession(oldSession *Session, reason error) *Session {
+// 	log.Printf("Session %s broken (%v), rebuilding...", oldSession.id, reason)
+
+// 	// 0. Try to notify peer (Best Effort)
+// 	// AlertLevel: 2 (Fatal), AlertDescription: 80 (Internal Error)
+// 	// 即使发送失败也不影响后续重建
+// 	_ = c.writeRecordLocked(recordTypeAlert, []byte{2, 80}, oldSession)
+
+// 	// 1. Terminate old session
+// 	c.terminateSession(oldSession, reason)
+
+// 	// 2. Create new session
+// 	newSession := NewSession(oldSession.id, oldSession.remoteId, c)
+// 	c.sessions.Store(newSession.id, newSession)
+
+// 	// 3. Handshake (Async)
+// 	go func() {
+// 		log.Printf("Starting handshake for new session %s", newSession.id)
+// 		if err := newSession.Handshake(); err != nil {
+// 			log.Printf("New session handshake failed: %v", err)
+// 			c.terminateSession(newSession, err)
+// 		} else {
+// 			log.Printf("New session handshake success: %s", newSession.id)
+// 		}
+// 	}()
+
+//		return newSession
+//	}
+type PingPongHandler func(string) error

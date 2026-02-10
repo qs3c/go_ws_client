@@ -82,7 +82,8 @@ func (s *Session) symHandshake(ctx context.Context) (err error) {
 
 	remoteHello, ok := msg.(*helloMsg)
 	if !ok {
-		s.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		// s.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		// s.SetError(errors.New("unexpectedMessageError"))
 		return errors.New("unexpectedMessageError")
 	}
 
@@ -176,7 +177,8 @@ func (s *Session) makeHello() (*helloMsg, error) {
 func (s *Session) pickE2EVersion(remoteHello *helloMsg) error {
 	vers, ok := s.conn.config.mutualVersion(remoteHello.supportedVersions)
 	if !ok {
-		s.out.setErrorLocked(errors.New("alertProtocolVersion"))
+		// s.out.setErrorLocked(errors.New("alertProtocolVersion"))
+		// s.SetError(errors.New("protocolVersionError"))
 		return fmt.Errorf("server selected unsupported protocol version")
 	}
 
@@ -246,7 +248,8 @@ func (hs *handshakeState) processHello() error {
 	if s.handshakes == 0 && hs.remoteHelloMsg.secureRenegotiationSupported {
 		s.secureRenegotiation = true
 		if len(hs.remoteHelloMsg.secureRenegotiation) != 0 {
-			return s.out.setErrorLocked(errors.New("tls: initial handshake had non-empty renegotiation extension"))
+			// return s.out.setErrorLocked(errors.New("tls: initial handshake had non-empty renegotiation extension"))
+			return errors.New("initialHandshakeError")
 		}
 	}
 
@@ -255,7 +258,8 @@ func (hs *handshakeState) processHello() error {
 		copy(expectedSecureRenegotiation[:], s.localFinished[:])
 		copy(expectedSecureRenegotiation[12:], s.remoteFinished[:])
 		if !bytes.Equal(hs.remoteHelloMsg.secureRenegotiation, expectedSecureRenegotiation[:]) {
-			return s.out.setErrorLocked(errors.New("tls: incorrect renegotiation extension contents"))
+			// return s.out.setErrorLocked(errors.New("tls: incorrect renegotiation extension contents"))
+			return errors.New("incorrectRenegotiationError")
 		}
 	}
 
@@ -266,7 +270,8 @@ func (hs *handshakeState) pickCipherSuite() error {
 	// 设置到 handshakeState 的 suite 和
 	// Conn 的 cipherSuite 上
 	if hs.suite = mutualCipherSuite(hs.helloMsg.cipherSuites, hs.remoteHelloMsg.cipherSuites); hs.suite == nil {
-		return hs.s.out.setErrorLocked(errors.New("tls: server chose an unconfigured cipher suite"))
+		// return hs.s.out.setErrorLocked(errors.New("tls: server chose an unconfigured cipher suite"))
+		return errors.New("unconfiguredCipherSuiteError")
 	}
 	// todo: 如果是国密这里suite的ka要特殊构造(也不一定要在这里)
 	// if sm2ka, ok := hs.suite.ka.(*sm2KeyAgreement); ok {
@@ -280,7 +285,8 @@ func (hs *handshakeState) pickCipherSuite() error {
 func (hs *handshakeState) pickSignatureScheme() error {
 
 	if hs.signatureScheme = mutualSignatureScheme(hs.helloMsg.supportedSignatureAlgorithms, hs.remoteHelloMsg.supportedSignatureAlgorithms); hs.signatureScheme == 0 {
-		return hs.s.out.setErrorLocked(errors.New("tls: server chose an unconfigured signature scheme"))
+		// return hs.s.out.setErrorLocked(errors.New("tls: server chose an unconfigured signature scheme"))
+		return errors.New("unconfiguredSignatureSchemeError")
 	}
 	return nil
 }
@@ -313,7 +319,8 @@ func (hs *handshakeState) doFullHandshake() error {
 	// 先发自己的 keyExchangeMsg
 	localKxm, err := keyAgreement.generateLocalKeyExchange(s.conn.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg)
 	if err != nil {
-		s.out.setErrorLocked(errors.New("alertInternalError"))
+		// s.out.setErrorLocked(errors.New("alertInternalError"))
+		// s.SetError(errors.New("alertInternalError"))
 		return err
 	}
 	if localKxm != nil {
@@ -332,7 +339,8 @@ func (hs *handshakeState) doFullHandshake() error {
 	if ok {
 		preMasterSecret, err = keyAgreement.processRemoteKeyExchange(s.conn.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg, remoteKxm)
 		if err != nil {
-			s.out.setErrorLocked(errors.New("alertIllegalParameter"))
+			// s.out.setErrorLocked(errors.New("alertIllegalParameter"))
+			// s.SetError(errors.New("alertIllegalParameter"))
 			return err
 		}
 		// 获取曲线并记录
@@ -403,13 +411,15 @@ func (hs *handshakeState) readFinished(out []byte) error {
 	}
 	serverFinished, ok := msg.(*finishedMsg)
 	if !ok {
-		return s.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		// return s.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
+		return errors.New("alertUnexpectedMessage")
 	}
 
 	verify := hs.finishedHash.remoteSum(hs.masterSecret)
 	if len(verify) != len(serverFinished.verifyData) ||
 		subtle.ConstantTimeCompare(verify, serverFinished.verifyData) != 1 {
-		return s.out.setErrorLocked(errors.New("alertHandshakeFailure"))
+		// return s.out.setErrorLocked(errors.New("alertHandshakeFailure"))
+		return errors.New("alertHandshakeFailure")
 	}
 
 	if err := transcriptMsg(serverFinished, &hs.finishedHash); err != nil {
