@@ -230,6 +230,7 @@ func (hs *handshakeState) handshake() error {
 	}
 
 	s.isHandshakeComplete.Store(true)
+	close(s.handshakeComplete)
 
 	return nil
 }

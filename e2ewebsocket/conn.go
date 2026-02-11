@@ -2,6 +2,7 @@ package e2ewebsocket
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -58,32 +59,35 @@ func (c *Conn) readLoop() {
 		// 关闭所有 session 的握手消息通道
 		c.sessions.Range(func(key, value any) bool {
 			session := value.(*Session)
-			close(session.handshakeChan)
+			session.Close()
 			return true
 		})
 		// 关闭 conn 的应用消息通道
 		close(c.msgChan)
+		c.Close()
 		log.Println("readLoop exited")
 	}()
 
 	for {
-		c.readRecord()
+		if err := c.readRecord(); err != nil {
+			return
+		}
 	}
 
 }
 
-func (c *Conn) readRecord() {
+func (c *Conn) readRecord() error {
 	msgType, msg, err := c.conn.ReadMessage()
 	if err != nil {
 		log.Printf("readLoop ReadMessage error: %v", err)
 		c.msgChan <- readMsgItem{err: err}
-		return
+		return err
 	}
 
 	// 如果不是二进制类型的，正常传递给上层
 	if msgType != websocket.BinaryMessage {
 		c.msgChan <- readMsgItem{msgType: msgType, msg: msg}
-		return
+		return nil
 	}
 
 	// 解析 msg 构造 sessionId 并获取到对应的 session
@@ -94,22 +98,12 @@ func (c *Conn) readRecord() {
 	actual, loaded := c.sessions.LoadOrStore(sessionId, NewSession(sessionId, senderId, c))
 	session := actual.(*Session)
 	if !loaded {
-		// 被动创建的 Session，需要主动触发握手以响应对端（对称握手）
-		// ########同步握手会阻塞用于泵数据的 readRecord 函数啊所以这里必须异步
 		go func(s *Session) {
 			if err := s.Handshake(); err != nil {
 				log.Printf("Passive handshake failed for session %s: %v", s.id, err)
 			}
 		}(session)
 	}
-
-	// 握手状态校验
-	// ===============【如果在这里才发现之前的连接已经坏掉了岂不是浪费了一条数据呢？早就应该发现并且出发session自愈了吧】
-	// if err := session.Err(); err != nil {
-	// 	// Log and trigger rebuild
-	// 	session = c.rebuildSession(session, err)
-	// 	// Retry with new session (session is now the new instance)
-	// }
 
 	handshakeComplete := session.isHandshakeComplete.Load()
 
@@ -121,88 +115,83 @@ func (c *Conn) readRecord() {
 		// ====================【设置永久错误和触发session自愈之间有gap，是否应该立即触发自愈而不是设置错误呢？】
 		c.terminateSession(session, err)
 		// c.msgChan <- readMsgItem{err: err}
-		return
+		return nil
 	}
 
 	switch typ {
 	default:
-		// 收到来自A的诡异消息，可能是被攻击了，也是永久关闭和A的通信了
+		// 收到来自A的诡异消息，可能被攻击了，终止 session
 		log.Printf("readLoop unexpected message type: %d", typ)
-		c.terminateSession(session, errors.New("alertUnexpectedMessage"))
-		// c.msgChan <- readMsgItem{err: errors.New("alertUnexpectedMessage")}
-		return
+		c.terminateSession(session, errors.New("UnexpectedMessage"))
+		return nil
 	// 收到来自 A 的 session 销毁通知
 	case recordTypeAlert:
 		if len(data) < 2 {
-			// c.msgChan <- readMsgItem{err: errors.New("alert message too short")}
 			log.Printf("收到不合法的Alert消息，长度小于2")
-			return
+			c.terminateSession(session, errors.New("AlertMessageLenError"))
+			return nil
 		}
 		log.Printf("readLoop received alert: level=%d, desc=%d from %s", data[0], data[1], senderId)
 		// 收到 Alert，直接销毁本地 Session
-		// session.SetError(errors.New("received alert"))
 		c.terminateSession(session, errors.New("received alert"))
-		return
+		return nil
 	// 收到来自 A 的应用数据记录
 	case recordTypeApplicationData:
 		// #############handshake 是异步的 这里的话很有可能没完成啊！
-		// 如果是加载出来的旧 session，没有完成就不行
-		// 如果是新 session 也就是第一条和A通信的应用消息，那么没有完成握手也是合法的！
 		// 特殊情况：握手太慢，第二条来的有太快了，来了还没握好，怎么办，直接永久错误？
-		if !handshakeComplete && loaded {
-			log.Printf("readLoop unexpected AppData: handshakeComplete=%v", handshakeComplete)
-			c.terminateSession(session, errors.New("alertUnexpectedMessage"))
-			// c.msgChan <- readMsgItem{err: errors.New("alertUnexpectedMessage")}
-			return
-		}
-		// 当前场景下，其实收到一个只有自定义添加的头部而body是空包的情况
-		// 可以说是不可能的，这相当于上层WriteMessage就是写的空[]byte
-		// if len(data) == 0 {
-		// 	// empty application data record
-		// 	// c.msgChan <- readMsgItem{err: errors.New("empty application data record")}
-		// 	// 忽略空包，继续读取
-		// 	return
-		// }
 
+		if !handshakeComplete && loaded {
+			// 特殊情况：握手其实已经完成了（Handshake函数返回了），但是状态位 isHandshakeComplete 还没来得及设置
+			// 此时应用数据就已经到了。我们需要给一点时间让握手协程更新状态。
+			// 这是一个非常短的竞态窗口。
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			if !session.isHandshakeComplete.Load() {
+				log.Printf("readLoop waiting for handshake completion for session %s...", sessionId)
+				select {
+				case <-session.handshakeComplete:
+				case <-ctx.Done():
+					log.Printf("readLoop handshake wait timeout for session %s", sessionId)
+					c.terminateSession(session, errors.New("alertUnexpectedMessage"))
+					return nil
+				case <-session.done:
+					return nil // Session closed
+				}
+			}
+		}
 		// 正常向上层传递应用数据记录
 		c.msgChan <- readMsgItem{sessionId: sessionId, remoteId: senderId, msgType: msgType, msg: data, err: nil}
 
 	// 收到来自 A 的握手记录
 	case recordTypeHandshake:
-		// if len(data) == 0 {
-		// 	c.msgChan <- readMsgItem{err: errors.New("alertUnexpectedMessage")}
-		// 	return
-		// }
 
 		// 发送到 session 专属通道
 		select {
 		case session.handshakeChan <- sessionMsg{typ: recordTypeHandshake, data: data}:
 		default:
-			// 防止阻塞 readLoop，虽然理论上握手过程应该在消费不会阻塞
-			//########### 但是如果 handshakeChan 写不进去阻塞了，这条握手消息相当于就丢弃掉了
-			// log.Println("session handshake channel full, dropping message")
+			// default 分支防止阻塞 readLoop 而存在，虽然理论上握手过程应该在消费不会阻塞
+			// 正常来说不可能阻塞，如果握手消息通道都塞满了说明 session 一定是出问题了
 			log.Printf("readLoop handshake channel blocked for session %s", session.id)
-			// c.msgChan <- readMsgItem{err: errors.New("handshake channel blocked")}
-			return
+			c.terminateSession(session, errors.New("handshake channel blocked"))
+			return nil
 		}
 
 	case recordTypeChangeCipherSpec:
 		// CCS 消息检查
 		if len(data) != 1 || data[0] != 1 {
 			c.terminateSession(session, errors.New("alertDecodeError"))
-			// c.msgChan <- readMsgItem{err: errors.New("alertDecodeError")}
-			return
+			return nil
 		}
 
 		// 变更 in 的密码套件
 		if err := session.in.changeCipherSpec(); err != nil {
 			log.Printf("readLoop changeCipherSpec error: %v", err)
 			c.terminateSession(session, errors.New("change cipher failed!"))
-			// c.msgChan <- readMsgItem{err: errors.New("change cipher failed!")}
-			return
+			return nil
 		}
 	}
-
+	return nil
 }
 
 func (c *Conn) ReadMessage() (int, []byte, error) {
@@ -259,23 +248,16 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 		return err
 	}
 
-	// 握手检查
-	// if err := session.Err(); err != nil {
-	// 	return err
-	// }
-
 	if !session.isHandshakeComplete.Load() {
 		return errors.New("[Write] handshake not complete")
 	}
 
 	err = c.writeRecordLocked(recordTypeApplicationData, message, session)
 	if err != nil {
-		// 这个错误似乎与session无关，session是健康的，需要把session干掉吗？
-		// ####################
-		// c.terminateSession(session, err)
-		return err
+		// 这里要么是加密错（与session有关）要么是ws错（与session无关）
+		// 加密错需要 terminateSession 在内部处理了
+		return c.Close()
 	}
-
 	return nil
 }
 
@@ -294,8 +276,8 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte, session *Session) 
 	var err error
 	outBuf, err = session.out.encrypt(outBuf, data, c.config.rand())
 	if err != nil {
-		// session.SetError(err)
-		return err
+		c.terminateSession(session, err)
+		return nil
 	}
 
 	// 发送
@@ -387,9 +369,9 @@ func getSessionID(A, B string) SessionID {
 }
 
 // 终止session
-func (c *Conn) terminateSession(session *Session, reason error) {
+func (c *Conn) terminateSession(session *Session, reason error) error {
 	if session == nil {
-		return
+		return reason
 	}
 
 	// 0. Try to notify peer (Best Effort)
@@ -409,6 +391,7 @@ func (c *Conn) terminateSession(session *Session, reason error) {
 	c.sessions.Delete(session.id)
 
 	log.Printf("Session %s terminated: %v", session.id, reason)
+	return reason
 }
 
 // 重建session，自愈逻辑

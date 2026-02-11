@@ -45,17 +45,19 @@ type Session struct {
 
 	handshakeChan chan sessionMsg
 
-	done      chan struct{}
-	closeOnce sync.Once
+	done              chan struct{}
+	handshakeComplete chan struct{} // 通知握手完成，替代 polling
+	closeOnce         sync.Once
 }
 
 func NewSession(id SessionID, remoteId string, conn *Conn) *Session {
 	s := &Session{
-		id:            id,
-		remoteId:      remoteId,
-		conn:          conn,
-		handshakeChan: make(chan sessionMsg, 16),
-		done:          make(chan struct{}),
+		id:                id,
+		remoteId:          remoteId,
+		conn:              conn,
+		handshakeChan:     make(chan sessionMsg, 16),
+		done:              make(chan struct{}),
+		handshakeComplete: make(chan struct{}),
 	}
 	s.in.session = s
 	s.out.session = s
