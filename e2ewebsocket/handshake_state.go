@@ -230,7 +230,13 @@ func (hs *handshakeState) handshake() error {
 	}
 
 	s.isHandshakeComplete.Store(true)
-	close(s.handshakeComplete)
+	// 使用非阻塞发送通知握手完成，替代 close，以便支持重协商
+	select {
+	case s.handshakeComplete <- struct{}{}:
+	default:
+		// 如果没人听就丢弃
+		// 反正 isHandshakeComplete 已经置 true 了
+	}
 
 	return nil
 }

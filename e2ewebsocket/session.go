@@ -57,12 +57,12 @@ func NewSession(id SessionID, remoteId string, conn *Conn) *Session {
 		conn:              conn,
 		handshakeChan:     make(chan sessionMsg, 16),
 		done:              make(chan struct{}),
-		handshakeComplete: make(chan struct{}),
+		handshakeComplete: make(chan struct{}, 1),
 	}
 	s.in.session = s
 	s.out.session = s
-	s.in.cond = sync.NewCond(&s.in)
-	s.out.cond = sync.NewCond(&s.out)
+	s.in.nextCipherReady = make(chan struct{}, 1)
+	s.out.nextCipherReady = make(chan struct{}, 1)
 	s.handshakeFn = s.symHandshake
 	return s
 }
@@ -114,8 +114,8 @@ func (s *Session) Close() {
 	s.closeOnce.Do(func() {
 		close(s.done)
 		// 唤醒所有等待者，让它们有机会检查 done channel 并退出
-		s.in.cond.Broadcast()
-		s.out.cond.Broadcast()
+		// s.in.cond.Broadcast()
+		// s.out.cond.Broadcast()
 	})
 }
 
@@ -214,8 +214,8 @@ type halfConn struct {
 
 	nextCipher any       // next encryption state
 	nextMac    hash.Hash // next MAC algorithm
-	// ########### cond 很重要，对称握手特有的竞态问题
-	cond *sync.Cond
+
+	nextCipherReady chan struct{}
 
 	// Fields added for session simplification
 	session *Session
@@ -359,9 +359,10 @@ func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash)
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
-	// prepareCC 完成通知所有等待的地方
-	if hc.cond != nil {
-		hc.cond.Broadcast()
+	// PCS 完成通知 CCS
+	select {
+	case hc.nextCipherReady <- struct{}{}:
+	default:
 	}
 }
 
@@ -370,29 +371,20 @@ func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash)
 func (hc *halfConn) changeCipherSpec() error {
 	hc.Lock()
 	defer hc.Unlock()
-	// 如果半连接没有错误，但是下一个 cipher 还没准备好是 nil
-	// 那么先 wait
-	// 如果因为出现错误或者 cipher 被 prepare 设置了
-	// 那么 cond 放行
-	// cipher 是一个既包含了密码套件类型（用什么算法）
-	// 也包含了密钥、随机值的东西，所以即使每次都用相同的算法
-	// 但是密钥、随机值是不一样的，cipher 也不一样
-	// 等待直到下一个 cipher 准备好，或者 session 被关闭
-	for hc.nextCipher == nil {
+
+	// 虽然 prepareCipherSpec 会在设置 nextCipher 后发送信号
+	// 但为了避免死锁，我们必须在等待信号前释放锁
+	// 因为 prepareCipherSpec 也需要获取锁才能设置 nextCipher
+	if hc.nextCipher == nil {
+		hc.Unlock()
 		// 检查是否 session 已关闭
 		select {
 		case <-hc.session.done:
+			hc.Lock() // 重新加锁以保证 defer Unlock 正常执行（虽然这里要返回error了，但为了defer安全性）
 			return errors.New("session closed")
-		default:
+		case <-hc.nextCipherReady:
 		}
-		hc.cond.Wait()
-	}
-
-	// 再次检查 session 是否关闭 (防止唤醒是因为 Close 导致的)
-	select {
-	case <-hc.session.done:
-		return errors.New("session closed")
-	default:
+		hc.Lock()
 	}
 
 	if hc.nextCipher == nil {
@@ -402,9 +394,11 @@ func (hc *halfConn) changeCipherSpec() error {
 	hc.mac = hc.nextMac
 	hc.nextCipher = nil
 	hc.nextMac = nil
-	// 将64位序列号seq重置为全0
-	// 这是TLS协议要求的，确保新的加密状态使用新的序列号计数
+	// 将 64 位序列号 seq 重置为全 0
+	// 这是 TLS 协议要求的，确保新的加密状态使用新的序列号计数
 	// 换密码套件了 seq 重新计数
+	// 不换的时候每次加解密时都增加计数
+	// in 和 out 各有各的计数
 	for i := range hc.seq {
 		hc.seq[i] = 0
 	}
