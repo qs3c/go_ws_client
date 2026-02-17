@@ -39,7 +39,7 @@ type sm2KeyAgreement struct {
 	// keyLen                int
 }
 
-func NewSM2KeyAgreement(local ccrypto.EVPPrivateKey, localId string, remote ccrypto.EVPPrivateKey, remoteId string) *sm2KeyAgreement {
+func NewSM2KeyAgreement(local ccrypto.EVPPrivateKey, localId string, remote ccrypto.EVPPublicKey, remoteId string) *sm2KeyAgreement {
 	// 这里要处理sm2的 eckey与pkey兼容问题，方式是 pkey 转 eckey
 	localECKEY, err := ccrypto.ToECKey(local)
 	if err != nil {

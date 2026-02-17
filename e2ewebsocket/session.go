@@ -84,6 +84,7 @@ func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 	s.handshakeMutex.Lock()
 	defer s.handshakeMutex.Unlock()
 
+	// 如果之前的握手是失败的，那么不能进行下一次握手
 	if err := s.handshakeErr; err != nil {
 		return err
 	}
@@ -91,7 +92,7 @@ func (s *Session) handshakeContext(ctx context.Context) (ret error) {
 		return nil
 	}
 
-	// ####################### 不同的 session 之间握手读写冲突问题未考虑
+	// 不同的 session 之间握手读写冲突问题
 	s.handshakeErr = s.handshakeFn(ctx)
 	if s.handshakeErr == nil {
 		s.handshakes++

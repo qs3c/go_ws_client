@@ -64,6 +64,7 @@ func (c *Conn) readLoop() {
 		})
 		// 关闭 conn 的应用消息通道
 		close(c.msgChan)
+		// 关闭底层 ws 连接
 		c.Close()
 		log.Println("readLoop exited")
 	}()
@@ -239,13 +240,10 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 		session = NewSession(sessionId, remoteId, c)
 		actual, _ := c.sessions.LoadOrStore(sessionId, session)
 		session = actual.(*Session)
-	}
-
-	// 握手
-	// 似乎不需要后置握手了
-	if err := session.Handshake(); err != nil {
-		c.terminateSession(session, err)
-		return err
+		if err := session.Handshake(); err != nil {
+			c.terminateSession(session, err)
+			return err
+		}
 	}
 
 	if !session.isHandshakeComplete.Load() {
