@@ -328,20 +328,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 		record = c.Seal(record, nonce, payload, additionalData)
 
 	// case cbcMode:
-	// 	mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
-	// 	blockSize := c.BlockSize()
-	// 	plaintextLen := len(payload) + len(mac)
-	// 	paddingLen := blockSize - plaintextLen%blockSize
-	// 	record, dst = sliceForAppend(record, plaintextLen+paddingLen)
-	// 	copy(dst, payload)
-	// 	copy(dst[len(payload):], mac)
-	// 	for i := plaintextLen; i < len(dst); i++ {
-	// 		dst[i] = byte(paddingLen - 1)
-	// 	}
-	// 	if len(explicitNonce) > 0 {
-	// 		c.SetIV(explicitNonce)
-	// 	}
-	// 	c.CryptBlocks(dst, dst)
+	// 	TODO:
 	default:
 		panic("unknown cipher type")
 	}
