@@ -3,6 +3,7 @@
 # locate VsDevCmd.bat and re-run itself inside it.
 [CmdletBinding()]
 param(
+  [string]$ProjectRoot,
   [string]$SourceDir,
   [string]$BuildDir,
   [string]$Prefix = $env:TONGSUO_PREFIX,
@@ -21,8 +22,18 @@ if ([string]::IsNullOrWhiteSpace($scriptDir)) {
     $scriptDir = (Get-Location).Path
   }
 }
-$repoRoot = Split-Path -Parent $scriptDir
-if ([string]::IsNullOrWhiteSpace($repoRoot)) { $repoRoot = $scriptDir }
+$defaultRepoRoot = Split-Path -Parent $scriptDir
+if ([string]::IsNullOrWhiteSpace($defaultRepoRoot)) { $defaultRepoRoot = $scriptDir }
+
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+  $cwd = (Get-Location).Path
+  if (Test-Path -LiteralPath (Join-Path $cwd "crypto\sm2keyexch")) {
+    $ProjectRoot = $cwd
+  } else {
+    $ProjectRoot = $defaultRepoRoot
+  }
+}
+$repoRoot = $ProjectRoot
 
 if ([string]::IsNullOrWhiteSpace($SourceDir)) {
   $SourceDir = Join-Path $repoRoot "third_party\tongsuo"
@@ -88,6 +99,7 @@ function Invoke-InDevCmd {
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
     "-File", "`"$PSCommandPath`"",
+    "-ProjectRoot", "`"$ProjectRoot`"",
     "-SourceDir", "`"$SourceDir`"",
     "-BuildDir", "`"$BuildDir`"",
     "-Prefix", "`"$Prefix`"",

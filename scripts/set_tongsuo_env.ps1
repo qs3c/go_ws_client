@@ -1,6 +1,12 @@
 # Sets runtime env vars for the vendored Tongsuo copy under third_party/tongsuo
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$tongsuoHome = Join-Path $repoRoot "third_party\\tongsuo-install"
+$defaultRepoRoot = Split-Path -Parent $PSScriptRoot
+$cwd = (Get-Location).Path
+if (Test-Path -LiteralPath (Join-Path $cwd "third_party\tongsuo-install")) {
+  $repoRoot = $cwd
+} else {
+  $repoRoot = $defaultRepoRoot
+}
+$tongsuoHome = Join-Path $repoRoot "third_party\tongsuo-install"
 
 if (-not (Test-Path -LiteralPath $tongsuoHome)) {
   Write-Error "Tongsuo not found at $tongsuoHome. Build or copy your Tongsuo tree there first."

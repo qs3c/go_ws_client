@@ -6,7 +6,12 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   exit 1
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -d "$PWD/third_party/tongsuo-install" ]]; then
+  ROOT="$PWD"
+else
+  ROOT="$DEFAULT_ROOT"
+fi
 TONGSUO_HOME="${TONGSUO_HOME:-$ROOT/third_party/tongsuo-install}"
 
 if [[ ! -d "$TONGSUO_HOME" ]]; then

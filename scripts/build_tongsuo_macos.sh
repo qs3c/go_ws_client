@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -d "$PWD/crypto/sm2keyexch" ]]; then
+  ROOT="$PWD"
+else
+  ROOT="$DEFAULT_ROOT"
+fi
 SRC="$ROOT/third_party/tongsuo"
 BUILD="${TONGSUO_BUILD_DIR:-$ROOT/third_party/tongsuo-build}"
 PREFIX="${TONGSUO_PREFIX:-$ROOT/third_party/tongsuo-install}"
