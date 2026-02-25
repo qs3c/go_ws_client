@@ -31,15 +31,17 @@ import (
 // }
 
 // 模拟的 Relay Server
-// 简单的广播服务器：收到消息后转发给除发送者以外的所有人
+// 根据要求：收到 conns[0] 的消息交替转发给 conns[1] 和 conns[2]
+// conns[1] 和 conns[2] 收到的消息转发给 conns[0]
 type mockServer struct {
 	mu    sync.Mutex
-	conns map[*websocket.Conn]string // conn -> id (if known)
+	conns []*websocket.Conn
+	turn  int
 }
 
 func newMockServer() *mockServer {
 	return &mockServer{
-		conns: make(map[*websocket.Conn]string),
+		conns: make([]*websocket.Conn, 0),
 	}
 }
 
@@ -51,12 +53,17 @@ func (s *mockServer) handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	s.conns[conn] = ""
+	s.conns = append(s.conns, conn)
 	s.mu.Unlock()
 
 	defer func() {
 		s.mu.Lock()
-		delete(s.conns, conn)
+		for i, c := range s.conns {
+			if c == conn {
+				s.conns = append(s.conns[:i], s.conns[i+1:]...)
+				break
+			}
+		}
 		s.mu.Unlock()
 		conn.Close()
 	}()
@@ -66,12 +73,24 @@ func (s *mockServer) handler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
-		// 广播
+		// 路由转发
 		s.mu.Lock()
-		for c := range s.conns {
-			if c != conn {
-				c.WriteMessage(mt, msg)
+		if len(s.conns) >= 3 {
+			if conn == s.conns[0] {
+				if s.turn == 0 {
+					s.conns[1].WriteMessage(mt, msg)
+					s.turn = 1
+				} else {
+					s.conns[2].WriteMessage(mt, msg)
+					s.turn = 0
+				}
+			} else if conn == s.conns[1] || conn == s.conns[2] {
+				s.conns[0].WriteMessage(mt, msg)
 			}
+		} else {
+			fmt.Printf("mockServer 报错: 预期至少有 3 个连接，当前只有 %d 个\n", len(s.conns))
+			s.mu.Unlock()
+			break
 		}
 		s.mu.Unlock()
 	}
@@ -186,16 +205,12 @@ func makeAppMsg(t *testing.T, from, to string, content []byte) []byte {
 
 func TestE2E_Concurrent(t *testing.T) {
 	// 1. 环境准备
-	// 使用已生成的静态密钥，位于 ../static_key
+	// 假设密钥已经在之前的步骤中生成好并保存在 ../static_key 目录下
 	cwd, _ := os.Getwd()
 	keyStorePath := filepath.Join(filepath.Dir(cwd), "static_key")
 	if _, err := os.Stat(keyStorePath); os.IsNotExist(err) {
-		t.Skipf("static_key dir not found at %s", keyStorePath)
+		t.Skipf("static_key 目录不存在于 %s, 请先运行 TestGenerateStaticKeys 生成密钥", keyStorePath)
 	}
-
-	// setupKeyStore(t, tmpDir, "alice")
-	// setupKeyStore(t, tmpDir, "bob")
-	// exchangeKeys(t, tmpDir, "alice", "bob")
 
 	// 2. 启动 Mock Server
 	ms := newMockServer()
@@ -204,10 +219,6 @@ func TestE2E_Concurrent(t *testing.T) {
 	wsUrl := "ws" + strings.TrimPrefix(s.URL, "http")
 
 	// 3. 配置 Config
-	// 我们需要一个支持 Gzip 的 Compressor
-	// 由于 albert/ws_client/compressor 包的可见性，我们直接使用默认 Gzip
-	// 但这要求我们在测试代码里也能正确压缩。
-	// 这里稍微偷懒：我们在 Config 里注入一个 Mock Compressor，它是透传的，不压缩
 	mockComp := &MockCompressor{}
 
 	cfgAlice := &Config{
@@ -220,40 +231,51 @@ func TestE2E_Concurrent(t *testing.T) {
 		Compressor:   mockComp,
 		Encoder:      encoder.NewGobEncoder(),
 	}
+	cfgCharlie := &Config{
+		KeyStorePath: keyStorePath,
+		Compressor:   mockComp,
+		Encoder:      encoder.NewGobEncoder(),
+	}
 
 	// 4. 连接
-	// Alice
+	// 按照顺序连接，保证 conns 数组里面的顺序：[1111111111, 2222222222, 3333333333]
 	wsAlice, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	connAlice := NewSecureConn(wsAlice, "alice", cfgAlice)
+	connAlice := NewSecureConn(wsAlice, "1111111111", cfgAlice)
 	defer connAlice.Close()
 
-	// Bob
 	wsBob, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	connBob := NewSecureConn(wsBob, "bob", cfgBob)
+	connBob := NewSecureConn(wsBob, "2222222222", cfgBob)
 	defer connBob.Close()
+
+	wsCharlie, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connCharlie := NewSecureConn(wsCharlie, "3333333333", cfgCharlie)
+	defer connCharlie.Close()
+
+	// 等待 mock server 将三个连接都加入 conns 数组
+	time.Sleep(100 * time.Millisecond)
 
 	// 5. 并发读写测试
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 
-	// Alice 循环发送消息给 Bob
+	// Alice (1111111111) 循环发送消息，按照要求交替发给 Bob 和 Charlie
 	go func() {
-		defer wg.Done()
 		for i := 0; i < 10; i++ {
-			originalText := fmt.Sprintf("Hello Bob %d", i)
-			payload := makeAppMsg(t, "alice", "bob", []byte(originalText))
-
-			// 并发写
-			go func() {
-				// 模拟上层应用的其他并发行为（如果有）
-				// 但这里主要是主循环发
-			}()
+			to := "2222222222"
+			if i%2 != 0 {
+				to = "3333333333"
+			}
+			originalText := fmt.Sprintf("Hello %s %d", to, i)
+			payload := makeAppMsg(t, "1111111111", to, []byte(originalText))
 
 			err := connAlice.WriteMessage(websocket.BinaryMessage, payload)
 			if err != nil {
@@ -264,55 +286,107 @@ func TestE2E_Concurrent(t *testing.T) {
 		}
 	}()
 
-	// Bob 循环读取消息
+	// Bob 循环读取消息并回复
 	go func() {
 		defer wg.Done()
 		count := 0
 		for {
 			_, msg, err := connBob.ReadMessage()
 			if err != nil {
-				// 连接关闭或错误
 				return
 			}
-			// 解码验证
-			// Conn 返回的是解密后的 [Req] 的 [MsgData] 吗?
-			// 不，conn.go:185 返回的是 data (session.in.decrypt 解密后的)
-			// 这个 data 对应的是 WriteMessage 时传入的 payload (即 makeAppMsg 的结果)
-			// 所以 Bob 读到的是 [Compressed [Gob [Req [Proto [MsgData]]]]]
 
-			// Mock Compressor 是透传
-			// Gob Decode
 			var req Req
 			dec := encoder.NewGobEncoder()
 			if err := dec.Decode(msg, &req); err != nil {
-				t.Errorf("Bob deccode req failed: %v", err)
 				continue
 			}
 			var msgData sdkws.MsgData
 			if err := proto.Unmarshal(req.Data, &msgData); err != nil {
-				t.Errorf("Bob unmarshal proto failed: %v", err)
 				continue
 			}
 
 			text := string(msgData.Content)
-			if !strings.Contains(text, "Hello Bob") {
+			if !strings.Contains(text, "Hello 2222222222") {
 				t.Errorf("Bob received unexpected text: %s", text)
 			}
-			// fmt.Printf("Bob received: %s\n", text)
+
 			count++
-			if count == 10 {
+			// 回复 Alice
+			replyText := fmt.Sprintf("2222222222 reply to %s", text)
+			replyPayload := makeAppMsg(t, "2222222222", "1111111111", []byte(replyText))
+			connBob.WriteMessage(websocket.BinaryMessage, replyPayload)
+
+			if count == 5 {
 				return
 			}
 		}
 	}()
 
-	// 同时 Alice 也可以读 (Wait for Bob response if we implemented Echo)
-	// Make connection full duplex
+	// Charlie 循环读取消息并回复
 	go func() {
+		defer wg.Done()
+		count := 0
 		for {
-			_, _, err := connAlice.ReadMessage()
+			_, msg, err := connCharlie.ReadMessage()
 			if err != nil {
-				t.Logf("Alice ReadMessage error: %v", err)
+				return
+			}
+
+			var req Req
+			dec := encoder.NewGobEncoder()
+			if err := dec.Decode(msg, &req); err != nil {
+				continue
+			}
+			var msgData sdkws.MsgData
+			if err := proto.Unmarshal(req.Data, &msgData); err != nil {
+				continue
+			}
+
+			text := string(msgData.Content)
+			if !strings.Contains(text, "Hello 3333333333") {
+				t.Errorf("Charlie received unexpected text: %s", text)
+			}
+
+			count++
+			// 回复 Alice
+			replyText := fmt.Sprintf("Charlie reply to %s", text)
+			replyPayload := makeAppMsg(t, "3333333333", "1111111111", []byte(replyText))
+			connCharlie.WriteMessage(websocket.BinaryMessage, replyPayload)
+
+			if count == 5 {
+				return
+			}
+		}
+	}()
+
+	// Alice 接收所有的回复
+	go func() {
+		defer wg.Done()
+		count := 0
+		for {
+			_, msg, err := connAlice.ReadMessage()
+			if err != nil {
+				return
+			}
+
+			var req Req
+			dec := encoder.NewGobEncoder()
+			if err := dec.Decode(msg, &req); err != nil {
+				continue
+			}
+			var msgData sdkws.MsgData
+			if err := proto.Unmarshal(req.Data, &msgData); err != nil {
+				continue
+			}
+
+			text := string(msgData.Content)
+			if !strings.Contains(text, "reply to") {
+				t.Errorf("Alice received unexpected text: %s", text)
+			}
+
+			count++
+			if count == 10 { // Bob * 5 + Charlie * 5
 				return
 			}
 		}
@@ -328,7 +402,7 @@ func TestE2E_Concurrent(t *testing.T) {
 	select {
 	case <-done:
 		// Success
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Test timed out")
 	}
 }

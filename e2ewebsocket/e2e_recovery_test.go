@@ -40,19 +40,19 @@ func TestE2E_SessionRecovery(t *testing.T) {
 	cfgAlice := &Config{KeyStorePath: keyStorePath, Compressor: mockComp, Encoder: encoder.NewGobEncoder()}
 	cfgBob := &Config{KeyStorePath: keyStorePath, Compressor: mockComp, Encoder: encoder.NewGobEncoder()}
 
-	// 4. Connect Alice and Bob
+	// 4. Connect Alice (1111111111) and Bob (2222222222)
 	wsAlice, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	connAlice := NewSecureConn(wsAlice, "alice", cfgAlice)
+	connAlice := NewSecureConn(wsAlice, "1111111111", cfgAlice)
 	defer connAlice.Close()
 
 	wsBob, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	connBob := NewSecureConn(wsBob, "bob", cfgBob)
+	connBob := NewSecureConn(wsBob, "2222222222", cfgBob)
 	defer connBob.Close()
 
 	// Helper to read 1 message from Bob
@@ -87,7 +87,7 @@ func TestE2E_SessionRecovery(t *testing.T) {
 
 	// 5. Phase 1: Normal Communication
 	// Alice sends "Seq 1"
-	payload1 := makeAppMsg(t, "alice", "bob", []byte("Seq 1"))
+	payload1 := makeAppMsg(t, "1111111111", "2222222222", []byte("Seq 1"))
 	if err := connAlice.WriteMessage(websocket.BinaryMessage, payload1); err != nil {
 		t.Fatalf("Alice write 1 failed: %v", err)
 	}
@@ -110,11 +110,11 @@ func TestE2E_SessionRecovery(t *testing.T) {
 	// Create a valid header structure
 	// [1 byte Type][10 byte HostID][Encrypted Data...]
 	// Type = 23 (ApplicationData)
-	// HostId = "alice\x00..."
+	// HostId = "1111111111"
 
 	badPacket := make([]byte, 11)
 	badPacket[0] = byte(recordTypeApplicationData)
-	copy(badPacket[1:11], "alice") // padded with zeros
+	copy(badPacket[1:11], "1111111111") // not padded because it's exactly 10 bytes
 
 	// Append garbage ciphertext
 	badPacket = append(badPacket, []byte("garbage_ciphertext_12345")...)
@@ -174,7 +174,7 @@ func TestE2E_SessionRecovery(t *testing.T) {
 	//             Alice MUST receive the Alert and delete her session for clean recovery.
 
 	t.Log("Phase 3: Attempting recovery message...")
-	payload2 := makeAppMsg(t, "alice", "bob", []byte("Seq 2"))
+	payload2 := makeAppMsg(t, "1111111111", "2222222222", []byte("Seq 2"))
 
 	// Retry loop to allow for Alert propagation and Handshake
 	success := false
