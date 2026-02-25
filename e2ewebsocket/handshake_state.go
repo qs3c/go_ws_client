@@ -199,11 +199,23 @@ func (hs *handshakeState) handshake() error {
 
 	hs.finishedHash = newFinishedHash(hs.suite, hs.localId, hs.remoteId)
 
-	if err := transcriptMsg(hs.helloMsg, &hs.finishedHash); err != nil {
-		return err
-	}
-	if err := transcriptMsg(hs.remoteHelloMsg, &hs.finishedHash); err != nil {
-		return err
+	// 统一按 initiator(ID大) 先写、responder 后写，确保双方 hash 相同
+	if hs.localId > hs.remoteId {
+		// 本方是 initiator
+		if err := transcriptMsg(hs.helloMsg, &hs.finishedHash); err != nil {
+			return err
+		}
+		if err := transcriptMsg(hs.remoteHelloMsg, &hs.finishedHash); err != nil {
+			return err
+		}
+	} else {
+		// 本方是 responder
+		if err := transcriptMsg(hs.remoteHelloMsg, &hs.finishedHash); err != nil {
+			return err
+		}
+		if err := transcriptMsg(hs.helloMsg, &hs.finishedHash); err != nil {
+			return err
+		}
 	}
 
 	if err := hs.doFullHandshake(); err != nil {
@@ -340,34 +352,68 @@ func (hs *handshakeState) doFullHandshake() error {
 		return err
 	}
 	if localKxm != nil {
-		if err := s.writeHandshakeRecord(localKxm, &hs.finishedHash); err != nil {
-			return err
+		// 统一按 initiator(ID大) 先写入 transcript
+		if hs.localId > hs.remoteId {
+			// 本方是 initiator，直接写自己的 kxm 到 transcript
+			if err := s.writeHandshakeRecord(localKxm, &hs.finishedHash); err != nil {
+				return err
+			}
+		} else {
+			// 本方是 responder，先发送但不写 transcript（等读到 initiator kxm 后再统一）
+			if err := s.writeHandshakeRecord(localKxm, nil); err != nil {
+				return err
+			}
 		}
 	}
 
 	// 再收对方的 keyExchangeMsg
-	msg, err := s.readHandshake(&hs.finishedHash)
+	msg, err := s.readHandshake(nil) // 不写 transcript，手动控制顺序
 	if err != nil {
 		return err
 	}
 	remoteKxm, ok := msg.(*keyExchangeMsg)
+
+	// 统一写 kxm 到 transcript：initiator 先，responder 后
+	if ok {
+		if hs.localId > hs.remoteId {
+			// 本方是 initiator：写对方(responder)的 kxm
+			if err := transcriptMsg(remoteKxm, &hs.finishedHash); err != nil {
+				return err
+			}
+		} else {
+			// 本方是 responder：先写 initiator(对方) kxm，再写自己(responder) kxm
+			if err := transcriptMsg(remoteKxm, &hs.finishedHash); err != nil {
+				return err
+			}
+			if err := transcriptMsg(localKxm, &hs.finishedHash); err != nil {
+				return err
+			}
+		}
+	}
+
 	var preMasterSecret []byte
 	if ok {
 		preMasterSecret, err = keyAgreement.processRemoteKeyExchange(s.conn.config, hs.signatureScheme, hs.helloMsg, hs.remoteHelloMsg, remoteKxm)
 		if err != nil {
-			// s.out.setErrorLocked(errors.New("alertIllegalParameter"))
-			// s.SetError(errors.New("alertIllegalParameter"))
 			return err
 		}
 		// 获取曲线并记录
 		if len(remoteKxm.key) >= 3 && remoteKxm.key[0] == 3 /* named curve */ {
 			s.curveID = CurveID(BEUint16(remoteKxm.key[1:]))
 		}
-
 	}
 
 	// sm2 的 initiator 逻辑影响到了外面，hs得有状态记录
-	hs.masterSecret = masterFromPreMasterSecret(s.vers, hs.suite, preMasterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random)
+	// 统一排序：initiator(ID大的一方)的random在前，responder的在后
+	var initiatorRandom, responderRandom []byte
+	if hs.localId > hs.remoteId {
+		initiatorRandom = hs.helloMsg.random
+		responderRandom = hs.remoteHelloMsg.random
+	} else {
+		initiatorRandom = hs.remoteHelloMsg.random
+		responderRandom = hs.helloMsg.random
+	}
+	hs.masterSecret = masterFromPreMasterSecret(s.vers, hs.suite, preMasterSecret, initiatorRandom, responderRandom)
 
 	// hs.finishedHash.discardHandshakeBuffer()
 
@@ -379,22 +425,41 @@ func (hs *handshakeState) establishKeys() error {
 	// 到这里你就发现sm2影响的不是只ka内部的逻辑了
 	// 甚至是影响到了外面，这里关于keys的生成
 
-	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
-		keysFromMasterSecret(s.vers, hs.suite, hs.masterSecret, hs.helloMsg.random, hs.remoteHelloMsg.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
-	var clientCipher, serverCipher any
-	var clientHash, serverHash hash.Hash
-	if hs.suite.cipher != nil {
-		clientCipher = hs.suite.cipher(clientKey, clientIV, false /* not for reading */)
-		clientHash = hs.suite.mac(clientMAC)
-		serverCipher = hs.suite.cipher(serverKey, serverIV, true /* for reading */)
-		serverHash = hs.suite.mac(serverMAC)
+	// 统一排序：initiator(ID大的一方)的random在前
+	var initiatorRandom, responderRandom []byte
+	if hs.localId > hs.remoteId {
+		initiatorRandom = hs.helloMsg.random
+		responderRandom = hs.remoteHelloMsg.random
 	} else {
-		clientCipher = hs.suite.aead(clientKey, clientIV)
-		serverCipher = hs.suite.aead(serverKey, serverIV)
+		initiatorRandom = hs.remoteHelloMsg.random
+		responderRandom = hs.helloMsg.random
 	}
 
-	s.in.prepareCipherSpec(s.vers, serverCipher, serverHash)
-	s.out.prepareCipherSpec(s.vers, clientCipher, clientHash)
+	initiatorMAC, responderMAC, initiatorKey, responderKey, initiatorIV, responderIV :=
+		keysFromMasterSecret(s.vers, hs.suite, hs.masterSecret, initiatorRandom, responderRandom, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
+	var initiatorCipher, responderCipher any
+	var initiatorHash, responderHash hash.Hash
+	if hs.suite.cipher != nil {
+		initiatorCipher = hs.suite.cipher(initiatorKey, initiatorIV, false /* not for reading */)
+		initiatorHash = hs.suite.mac(initiatorMAC)
+		responderCipher = hs.suite.cipher(responderKey, responderIV, true /* for reading */)
+		responderHash = hs.suite.mac(responderMAC)
+	} else {
+		initiatorCipher = hs.suite.aead(initiatorKey, initiatorIV)
+		responderCipher = hs.suite.aead(responderKey, responderIV)
+	}
+
+	// initiator 的 out 用 initiatorCipher, in 用 responderCipher
+	// responder 的 out 用 responderCipher, in 用 initiatorCipher
+	if hs.localId > hs.remoteId {
+		// 本方是 initiator
+		s.in.prepareCipherSpec(s.vers, responderCipher, responderHash)
+		s.out.prepareCipherSpec(s.vers, initiatorCipher, initiatorHash)
+	} else {
+		// 本方是 responder
+		s.in.prepareCipherSpec(s.vers, initiatorCipher, initiatorHash)
+		s.out.prepareCipherSpec(s.vers, responderCipher, responderHash)
+	}
 	return nil
 }
 

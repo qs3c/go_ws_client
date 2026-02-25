@@ -16,7 +16,4 @@ func TestGenKeys(t *testing.T) {
 	setupKeyStore(t, keyStorePath, "2222222222")
 	setupKeyStore(t, keyStorePath, "3333333333")
 
-	exchangeKeys(t, keyStorePath, "1111111111", "2222222222")
-	exchangeKeys(t, keyStorePath, "1111111111", "3333333333")
-	exchangeKeys(t, keyStorePath, "2222222222", "3333333333")
 }

@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"crypto/sha1"
 	"errors"
+	"fmt"
 
 	ccrypto "github.com/albert/ws_client/crypto"
 	"github.com/albert/ws_client/crypto/ecdh_curve"
@@ -94,6 +95,7 @@ func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, signatureSch
 	} else {
 		signed = hashForKeyExchange(sigType, sigHash, remoteHello.random, hello.random, localECDHEParams)
 	}
+	fmt.Printf("[%s] generateLocalKeyExchange hash inputs:\n  hello.random: %x\n  remoteHello.random: %x\n  localECDHEParams: %x\n  signed hex: %x\n", ka.localId, hello.random, remoteHello.random, localECDHEParams, signed)
 	signature, err := sm2tongsuo.SignASN1(ka.localStaticPrivateKey, signed)
 	if err != nil {
 		return nil, err
@@ -116,8 +118,10 @@ func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, signatureSch
 
 // 这本来就是 sm2 交换的密钥处理逻辑函数，无需考虑兼容性
 func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureScheme SignatureScheme, hello *helloMsg, remoteHello *helloMsg, kxm *keyExchangeMsg) ([]byte, error) {
+	fmt.Printf("processRemoteKeyExchange: received kxm.key length=%d, content=%x\n", len(kxm.key), kxm.key)
 	// 第一部分：验证临时公钥
 	if len(kxm.key) < 4 {
+		fmt.Printf("processRemoteKeyExchange err: len(kxm.key)(%d) < 4\n", len(kxm.key))
 		return nil, errKeyExchange
 	}
 	if kxm.key[0] != 3 { // named curve
@@ -137,6 +141,7 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	// publicKey 是 RB
 	publicLen := int(kxm.key[3])
 	if publicLen+4 > len(kxm.key) {
+		fmt.Printf("processRemoteKeyExchange err: publicLen+4(%d) > len(kxm.key)(%d)\n", publicLen+4, len(kxm.key))
 		return nil, errKeyExchange
 	}
 	remoteECDHEParams := kxm.key[:4+publicLen]
@@ -144,6 +149,7 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 
 	sig := kxm.key[4+publicLen:]
 	if len(sig) < 2 {
+		fmt.Printf("processRemoteKeyExchange err: len(sig)(%d) < 2\n", len(sig))
 		return nil, errKeyExchange
 	}
 
@@ -174,11 +180,15 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	// 把 RB 放到 PublicKey 结构体里面
 	peerKey, err := key.Curve().NewPublicKey(publicKey)
 	if err != nil {
+		fmt.Printf("processRemoteKeyExchange err: NewPublicKey failed: %v\n", err)
 		return nil, errKeyExchange
 	}
 
-	ka.preMasterSecret, err = key.ECDH(peerKey)
+	// 由于标准 ECDH 接口并没有 ctxLocal 这个特有依赖（而且SM2必须用C库保留的上下文状态），我们进行断言并调用独有方法
+	// key 本身已经是 *ecdh_curve.sm2PrivateKey 类型，无需断言
+	ka.preMasterSecret, err = key.ComputeSecret(ka.ctxLocal, peerKey)
 	if err != nil {
+		fmt.Printf("processRemoteKeyExchange err: ComputeSecret failed: %v\n", err)
 		return nil, errKeyExchange
 	}
 
@@ -196,6 +206,7 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	signatureAlgorithm := SignatureScheme(sig[0])<<8 | SignatureScheme(sig[1])
 	sig = sig[2:]
 	if len(sig) < 2 {
+		fmt.Printf("processRemoteKeyExchange err2: len(sig)(%d) < 2\n", len(sig))
 		return nil, errKeyExchange
 	}
 
@@ -209,17 +220,20 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	}
 	sigType, sigHash, err = typeAndHashFromSignatureScheme(signatureScheme)
 	if err != nil {
+		fmt.Printf("processRemoteKeyExchange err: typeAndHashFromSignatureScheme failed: %v\n", err)
 		return nil, err
 	}
 
 	// if (sigType == signaturePKCS1v15 || sigType == signatureRSAPSS) != ka.isRSA {
 	if sigType != signatureSM2 {
+		fmt.Printf("processRemoteKeyExchange err: sigType(%d) != signatureSM2(%d)\n", sigType, signatureSM2)
 		// SM2 密钥协商中不可以用其他签名只能用 SM2	 签名
 		return nil, errKeyExchange
 	}
 
 	sigLen := int(sig[0])<<8 | int(sig[1])
 	if sigLen+2 != len(sig) {
+		fmt.Printf("processRemoteKeyExchange err: sigLen+2(%d) != len(sig)(%d)\n", sigLen+2, len(sig))
 		return nil, errKeyExchange
 	}
 	sig = sig[2:]
@@ -230,7 +244,9 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	} else {
 		signed = hashForKeyExchange(sigType, sigHash, remoteHello.random, hello.random, remoteECDHEParams)
 	}
+	fmt.Printf("[%s] processRemoteKeyExchange hash inputs:\n  hello.random: %x\n  remoteHello.random: %x\n  remoteECDHEParams: %x\n  signed hex: %x\n", ka.localId, hello.random, remoteHello.random, remoteECDHEParams, signed)
 	if err := verifyHandshakeSignature(sigType, ka.remoteStaticPublicKey, sigHash, signed, sig); err != nil {
+		fmt.Printf("processRemoteKeyExchange err: verifyHandshakeSignature failed: %v\n", err)
 		return nil, errors.New("invalid signature by the server certificate: " + err.Error())
 	}
 	return ka.preMasterSecret, nil

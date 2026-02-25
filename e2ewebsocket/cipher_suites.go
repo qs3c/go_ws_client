@@ -2,6 +2,7 @@ package e2ewebsocket
 
 import (
 	"crypto/cipher"
+	"fmt"
 	"hash"
 
 	"github.com/albert/ws_client/crypto/sm4tongsuo"
@@ -34,7 +35,6 @@ const (
 
 	suiteSM3
 )
-
 
 // 密码套件 uint16 标识码
 const (
@@ -152,7 +152,6 @@ type cipherSuite struct {
 // 	{TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, 16, 20, 0, ecdheECDSAKA, suiteECDHE | suiteECSign, cipherRC4, macSHA1, nil},
 // }
 
-
 func mutualCipherSuiteOld(have []uint16, want uint16) *cipherSuite {
 	for _, id := range have {
 		if id == want {
@@ -172,10 +171,8 @@ func mutualCipherSuite(have []uint16, want []uint16) *cipherSuite {
 
 // 暂时放在这，放这里不太合适其实
 func mutualSignatureScheme(have []SignatureScheme, want []SignatureScheme) SignatureScheme {
+	fmt.Printf("mutualSignatureScheme - have/client_supported: %v, want/server_supported: %v\n", have, want)
 	pickedSignatureScheme := Intersection(have, want)
-	if pickedSignatureScheme == 0 {
-		return 0
-	}
 	return pickedSignatureScheme
 }
 

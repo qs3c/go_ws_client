@@ -513,6 +513,12 @@ func LoadPublicKeyFromPEM(pemBlock []byte) (EVPPublicKey, error) {
 		C.X_EVP_PKEY_free(p.key)
 	})
 
+	if C.X_EVP_PKEY_is_sm2(p.key) == 1 {
+		if C.EVP_PKEY_set_alias_type(p.key, C.EVP_PKEY_SM2) != 1 {
+			return nil, PopError()
+		}
+	}
+
 	return p, nil
 }
 

@@ -9,15 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/albert/ws_client/compressor"
-	"github.com/albert/ws_client/encoder"
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
 )
-
-var cmp = compressor.NewGzipCompressor()
-var ecd = encoder.NewGobEncoder()
 
 type Conn struct {
 	conn     *websocket.Conn
@@ -210,7 +205,7 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 	var remoteId string
 	var err error
 	if c.parseReceivedMsg == nil {
-		remoteId, err = parseReceivedMsgOPENIM(message)
+		remoteId, err = c.parseReceivedMsgOPENIM(message)
 		if err != nil {
 			return err
 		}
@@ -333,10 +328,10 @@ func (c *Conn) IsNil() bool {
 	return true
 }
 
-func parseReceivedMsgOPENIM(msg []byte) (string, error) {
+func (c *Conn) parseReceivedMsgOPENIM(msg []byte) (string, error) {
 
 	// 解压
-	decompressMsg, err := cmp.DecompressWithPool(msg)
+	decompressMsg, err := c.config.compressor().DecompressWithPool(msg)
 	if err != nil {
 		log.Printf("解压消息失败: %v", err)
 		return "", err
@@ -344,7 +339,7 @@ func parseReceivedMsgOPENIM(msg []byte) (string, error) {
 
 	// 解码
 	var req Req
-	err = ecd.Decode(decompressMsg, &req)
+	err = c.config.encoder().Decode(decompressMsg, &req)
 	if err != nil {
 		log.Printf("解码消息失败: %v", err)
 		return "", err

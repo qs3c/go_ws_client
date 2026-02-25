@@ -163,6 +163,7 @@ func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHa
 		m = new(finishedMsg)
 	default:
 		// return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
+		fmt.Printf("unmarshalHandshakeMessage err: unknown type %d, data: %x\n", data[0], data)
 		return nil, errors.New("alertUnexpectedMessage")
 	}
 
@@ -172,6 +173,7 @@ func (s *Session) unmarshalHandshakeMessage(data []byte, transcript transcriptHa
 
 	if !m.unmarshal(data) {
 		// return nil, s.in.setErrorLocked(s.out.setErrorLocked(errors.New("alertUnexpectedMessage")))
+		fmt.Printf("unmarshalHandshakeMessage err: m.unmarshal(data) failed. type %d, data: %x\n", data[0], data)
 		return nil, errors.New("alertUnexpectedMessage")
 	}
 

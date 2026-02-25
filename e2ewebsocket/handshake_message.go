@@ -49,11 +49,22 @@ func (m *helloMsg) marshal() ([]byte, error) {
 		})
 	}
 
+	// 扩展3 supportedSignatureAlgorithms
+	if len(m.supportedSignatureAlgorithms) > 0 {
+		exts.AddUint16(extensionSignatureAlgorithms)
+		exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
+			exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
+				for _, sigAlg := range m.supportedSignatureAlgorithms {
+					exts.AddUint16(uint16(sigAlg))
+				}
+			})
+		})
+	}
+
 	extBytes, err := exts.Bytes()
 	if err != nil {
 		return nil, err
 	}
-
 
 	// 构造hello消息主体
 	var b cryptobyte.Builder
@@ -91,6 +102,8 @@ func (m *helloMsg) unmarshal(data []byte) bool {
 
 	*m = helloMsg{original: data}
 	s := cryptobyte.String(data)
+
+	m.supportedVersions = make([]uint16, 1)
 
 	// 跳过 1消息类型(1字节)和长度(3字节)
 	// 读取 2代表版号(2字节)
@@ -172,6 +185,19 @@ func (m *helloMsg) unmarshal(data []byte) bool {
 				}
 				m.supportedVersions = append(m.supportedVersions, vers)
 			}
+		case extensionSignatureAlgorithms:
+			// RFC 8446, Section 4.2.3
+			var sigAlgs cryptobyte.String
+			if !extData.ReadUint16LengthPrefixed(&sigAlgs) || sigAlgs.Empty() {
+				return false
+			}
+			for !sigAlgs.Empty() {
+				var sigAlg uint16
+				if !sigAlgs.ReadUint16(&sigAlg) {
+					return false
+				}
+				m.supportedSignatureAlgorithms = append(m.supportedSignatureAlgorithms, SignatureScheme(sigAlg))
+			}
 		default:
 			// Ignore unknown extensions.
 			continue
@@ -251,11 +277,11 @@ func (m *keyExchangeMsg) marshal() ([]byte, error) {
 	return x, nil
 
 	// var b cryptobyte.Builder
-    // b.AddUint8(typeKeyExchange)
-    // b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-    //     b.AddBytes(m.key)
-    // })
-    // return b.Bytes()
+	// b.AddUint8(typeKeyExchange)
+	// b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+	//     b.AddBytes(m.key)
+	// })
+	// return b.Bytes()
 }
 
 func (m *keyExchangeMsg) unmarshal(data []byte) bool {
@@ -265,8 +291,6 @@ func (m *keyExchangeMsg) unmarshal(data []byte) bool {
 	m.key = data[4:]
 	return true
 }
-
-
 
 type finishedMsg struct {
 	verifyData []byte

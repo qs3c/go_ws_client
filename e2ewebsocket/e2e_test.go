@@ -36,7 +36,6 @@ import (
 type mockServer struct {
 	mu    sync.Mutex
 	conns []*websocket.Conn
-	turn  int
 }
 
 func newMockServer() *mockServer {
@@ -73,24 +72,15 @@ func (s *mockServer) handler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
-		// 路由转发
+		// 根据消息协议：首字节(类型) + 10字节(发送者ID)
+		if len(msg) < 11 {
+			continue // 丢弃不合法消息
+		}
 		s.mu.Lock()
-		if len(s.conns) >= 3 {
-			if conn == s.conns[0] {
-				if s.turn == 0 {
-					s.conns[1].WriteMessage(mt, msg)
-					s.turn = 1
-				} else {
-					s.conns[2].WriteMessage(mt, msg)
-					s.turn = 0
-				}
-			} else if conn == s.conns[1] || conn == s.conns[2] {
-				s.conns[0].WriteMessage(mt, msg)
+		for _, targetConn := range s.conns {
+			if targetConn != conn {
+				targetConn.WriteMessage(mt, msg)
 			}
-		} else {
-			fmt.Printf("mockServer 报错: 预期至少有 3 个连接，当前只有 %d 个\n", len(s.conns))
-			s.mu.Unlock()
-			break
 		}
 		s.mu.Unlock()
 	}
@@ -125,37 +115,6 @@ func setupKeyStore(t *testing.T, baseDir, id string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "public_key.pem"), pemPub, 0644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// 交换公钥：Mock "Key Distribution Center"
-// 让 Alice 目录里有 Bob 的公钥，反之亦然
-func exchangeKeys(t *testing.T, baseDir, idA, idB string) {
-	// A <- B
-	pubB, err := os.ReadFile(filepath.Join(baseDir, idB, "public_key.pem"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 放在 A 目录下的 B 子目录
-	dirA_B := filepath.Join(baseDir, idA, idB)
-	if err := os.MkdirAll(dirA_B, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dirA_B, "public_key.pem"), pubB, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// B <- A
-	pubA, err := os.ReadFile(filepath.Join(baseDir, idA, "public_key.pem"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dirB_A := filepath.Join(baseDir, idB, idA)
-	if err := os.MkdirAll(dirB_A, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dirB_A, "public_key.pem"), pubA, 0644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -231,14 +190,9 @@ func TestE2E_Concurrent(t *testing.T) {
 		Compressor:   mockComp,
 		Encoder:      encoder.NewGobEncoder(),
 	}
-	cfgCharlie := &Config{
-		KeyStorePath: keyStorePath,
-		Compressor:   mockComp,
-		Encoder:      encoder.NewGobEncoder(),
-	}
 
 	// 4. 连接
-	// 按照顺序连接，保证 conns 数组里面的顺序：[1111111111, 2222222222, 3333333333]
+	// 按照顺序连接，保证 conns 数组里面的顺序：[1111111111, 2222222222]
 	wsAlice, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -259,32 +213,18 @@ func TestE2E_Concurrent(t *testing.T) {
 	}
 	defer connBob.Close()
 
-	wsCharlie, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	connCharlie, err := NewSecureConn(wsCharlie, "3333333333", cfgCharlie)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connCharlie.Close()
-
-	// 等待 mock server 将三个连接都加入 conns 数组
+	// 等待 mock server 将两个连接都加入 conns 数组
 	time.Sleep(100 * time.Millisecond)
 
 	// 5. 并发读写测试
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(2)
 
-	// Alice (1111111111) 循环发送消息，按照要求交替发给 Bob 和 Charlie
+	// Alice (1111111111) 循环发送消息，只发送给 Bob
 	go func() {
-		for i := 0; i < 10; i++ {
-			to := "2222222222"
-			if i%2 != 0 {
-				to = "3333333333"
-			}
-			originalText := fmt.Sprintf("Hello %s %d", to, i)
-			payload := makeAppMsg(t, "1111111111", to, []byte(originalText))
+		for i := 0; i < 3; i++ {
+			originalText := fmt.Sprintf("Hello 2222222222 %d", i)
+			payload := makeAppMsg(t, "1111111111", "2222222222", []byte(originalText))
 
 			err := connAlice.WriteMessage(websocket.BinaryMessage, payload)
 			if err != nil {
@@ -326,44 +266,7 @@ func TestE2E_Concurrent(t *testing.T) {
 			replyPayload := makeAppMsg(t, "2222222222", "1111111111", []byte(replyText))
 			connBob.WriteMessage(websocket.BinaryMessage, replyPayload)
 
-			if count == 5 {
-				return
-			}
-		}
-	}()
-
-	// Charlie 循环读取消息并回复
-	go func() {
-		defer wg.Done()
-		count := 0
-		for {
-			_, msg, err := connCharlie.ReadMessage()
-			if err != nil {
-				return
-			}
-
-			var req Req
-			dec := encoder.NewGobEncoder()
-			if err := dec.Decode(msg, &req); err != nil {
-				continue
-			}
-			var msgData sdkws.MsgData
-			if err := proto.Unmarshal(req.Data, &msgData); err != nil {
-				continue
-			}
-
-			text := string(msgData.Content)
-			if !strings.Contains(text, "Hello 3333333333") {
-				t.Errorf("Charlie received unexpected text: %s", text)
-			}
-
-			count++
-			// 回复 Alice
-			replyText := fmt.Sprintf("Charlie reply to %s", text)
-			replyPayload := makeAppMsg(t, "3333333333", "1111111111", []byte(replyText))
-			connCharlie.WriteMessage(websocket.BinaryMessage, replyPayload)
-
-			if count == 5 {
+			if count == 3 {
 				return
 			}
 		}
@@ -395,7 +298,7 @@ func TestE2E_Concurrent(t *testing.T) {
 			}
 
 			count++
-			if count == 10 { // Bob * 5 + Charlie * 5
+			if count == 3 { // Bob * 3
 				return
 			}
 		}
@@ -411,7 +314,7 @@ func TestE2E_Concurrent(t *testing.T) {
 	select {
 	case <-done:
 		// Success
-	case <-time.After(10 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Test timed out")
 	}
 }

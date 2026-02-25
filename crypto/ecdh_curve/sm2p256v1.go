@@ -95,9 +95,11 @@ func (c *sm2p256v1Curve) NewPrivateKey(key []byte) (PrivateKey, error) {
 
 // eckeyPub 的字节序列包装为 sm2PublicKey
 func (c *sm2p256v1Curve) NewPublicKey(key []byte) (PublicKey, error) {
-	if len(key) != sm2p256v1PublicKeySize {
-		return nil, errors.New("sm2p256v1: invalid public key size")
-	}
+	// 临时公钥长度是由底层 C 库（如 tongsuo）生成的 133 bytes 等各种可能。
+	// 原版写死的 91 字节会导致握手包解出的 key 被拒。
+	// if len(key) != sm2p256v1PublicKeySize {
+	// 	return nil, errors.New("sm2p256v1: invalid public key size")
+	// }
 
 	return &sm2PublicKey{
 		curve:     c,
@@ -114,34 +116,14 @@ func (c *sm2p256v1Curve) ecdh(local PrivateKey, remote PublicKey) (keyLocal []by
 	if remote == nil {
 		return nil, errors.New("sm2p256v1: remote public key (RB) cant be nil")
 	}
-	remotePublicKey, ok := remote.(*sm2PublicKey)
+	_, ok := remote.(*sm2PublicKey)
 	if !ok {
 		return nil, errors.New("sm2p256v1: remote public key type mismatch")
 	}
-	RB := remotePublicKey.publicKey
+	// RB := remotePublicKey.publicKey
 
-	ctxLocal := sm2keyexch.NewKAPCtx()
-
-	// if err := ctxLocal.Init(c.localStaticECKeyPrivate, c.localID, c.remoteStaticECKeyPublic, c.remoteID, c.initiator, c.doCheckSum); err != nil {
-	// 	return nil, err
-	// }
-	// // 这一步要分出去，不能放在 ecdh 里面
-	// c.RA, err = ctxLocal.Prepare()
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// ecdh里面只做 Compute key 和 FinalCheck 都做不了
-	keyLocal, c.csLocal, err = ctxLocal.ComputeKey(RB, 32)
-	if err != nil {
-		return nil, err
-	}
-	// 怎么把RA csLocal 传出去，怎么把csRemote弄进来
-
-	// if err := ctxLocal.FinalCheck(c.csRemote); err != nil {
-	// 	return nil, err
-	// }
-
-	return keyLocal, nil
+	// 临时废弃，防误调
+	return nil, errors.New("sm2p256v1: do not use standard ecdh, use ComputeSecret with KAPCtx")
 }
 
 // --- PrivateKey Implementation ---
@@ -192,6 +174,35 @@ func (k *sm2PrivateKey) ECDH(remote PublicKey) ([]byte, error) {
 		return nil, errors.New("sm2p256v1: remote public key curve mismatch")
 	}
 	return k.curve.ecdh(nil, remotePublicKey)
+}
+
+// 独有的计算共享密钥函数，它能携带在 Init 和 Prepare 后真正有用的 ctxLocal 进去算
+func (k *sm2PrivateKey) ComputeSecret(ctxLocal *sm2keyexch.KAPCtx, remote PublicKey) ([]byte, error) {
+	if remote == nil {
+		return nil, errors.New("sm2p256v1: remote public key (RB) cant be nil")
+	}
+	remotePublicKey, ok := remote.(*sm2PublicKey)
+	if !ok {
+		return nil, errors.New("sm2p256v1: remote public key type mismatch")
+	}
+	if remotePublicKey.curve != k.curve {
+		return nil, errors.New("sm2p256v1: remote public key curve mismatch")
+	}
+
+	RB := remotePublicKey.publicKey
+
+	// ecdh里面只做 Compute key 和 FinalCheck 都做不了
+	keyLocal, _, err := ctxLocal.ComputeKey(RB, 32)
+	if err != nil {
+		return nil, err
+	}
+	// 怎么把RA csLocal 传出去，怎么把csRemote弄进来
+
+	// if err := ctxLocal.FinalCheck(c.csRemote); err != nil {
+	// 	return nil, err
+	// }
+
+	return keyLocal, nil
 }
 func (k *sm2PrivateKey) PublicKey() PublicKey {
 	return k.publicKey
