@@ -95,7 +95,6 @@ func (ka *sm2KeyAgreement) generateLocalKeyExchange(config *Config, signatureSch
 	} else {
 		signed = hashForKeyExchange(sigType, sigHash, remoteHello.random, hello.random, localECDHEParams)
 	}
-	fmt.Printf("[%s] generateLocalKeyExchange hash inputs:\n  hello.random: %x\n  remoteHello.random: %x\n  localECDHEParams: %x\n  signed hex: %x\n", ka.localId, hello.random, remoteHello.random, localECDHEParams, signed)
 	signature, err := sm2tongsuo.SignASN1(ka.localStaticPrivateKey, signed)
 	if err != nil {
 		return nil, err
@@ -244,7 +243,6 @@ func (ka *sm2KeyAgreement) processRemoteKeyExchange(config *Config, signatureSch
 	} else {
 		signed = hashForKeyExchange(sigType, sigHash, remoteHello.random, hello.random, remoteECDHEParams)
 	}
-	fmt.Printf("[%s] processRemoteKeyExchange hash inputs:\n  hello.random: %x\n  remoteHello.random: %x\n  remoteECDHEParams: %x\n  signed hex: %x\n", ka.localId, hello.random, remoteHello.random, remoteECDHEParams, signed)
 	if err := verifyHandshakeSignature(sigType, ka.remoteStaticPublicKey, sigHash, signed, sig); err != nil {
 		fmt.Printf("processRemoteKeyExchange err: verifyHandshakeSignature failed: %v\n", err)
 		return nil, errors.New("invalid signature by the server certificate: " + err.Error())

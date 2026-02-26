@@ -472,7 +472,7 @@ func (hs *handshakeState) sendFinished(out []byte) error {
 
 	finished := new(finishedMsg)
 	finished.verifyData = hs.finishedHash.localSum(hs.masterSecret)
-	if err := s.writeHandshakeRecord(finished, &hs.finishedHash); err != nil {
+	if err := s.writeHandshakeRecord(finished, nil); err != nil {
 		return err
 	}
 	copy(out, finished.verifyData)
@@ -482,24 +482,18 @@ func (hs *handshakeState) sendFinished(out []byte) error {
 func (hs *handshakeState) readFinished(out []byte) error {
 	s := hs.s
 
-	// if err := s.conn.readChangeCipherSpec(); err != nil {
-	// 	return err
-	// }
-
 	msg, err := s.readHandshake(nil)
 	if err != nil {
 		return err
 	}
 	serverFinished, ok := msg.(*finishedMsg)
 	if !ok {
-		// return s.out.setErrorLocked(errors.New("alertUnexpectedMessage"))
 		return errors.New("alertUnexpectedMessage")
 	}
 
 	verify := hs.finishedHash.remoteSum(hs.masterSecret)
 	if len(verify) != len(serverFinished.verifyData) ||
 		subtle.ConstantTimeCompare(verify, serverFinished.verifyData) != 1 {
-		// return s.out.setErrorLocked(errors.New("alertHandshakeFailure"))
 		return errors.New("alertHandshakeFailure")
 	}
 
