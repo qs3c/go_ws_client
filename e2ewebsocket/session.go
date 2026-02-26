@@ -194,11 +194,15 @@ func (s *Session) writeHandshakeRecord(msg handshakeMessage, transcript transcri
 		transcript.Write(data)
 	}
 
-	return s.conn.writeRecordLocked(recordTypeHandshake, data, s)
+	// 构造 Handshake MsgData
+	msgData := s.conn.imParser.ConstructMsgData(s.conn.hostId, s.remoteId, data)
+	return s.conn.writeRecordLocked(recordTypeHandshake, msgData, s)
 }
 
 func (s *Session) writeChangeCipherRecord() error {
-	err := s.conn.writeRecordLocked(recordTypeChangeCipherSpec, []byte{1}, s)
+	// 构造 CCS MsgData
+	msgData := s.conn.imParser.ConstructMsgData(s.conn.hostId, s.remoteId, []byte("CCS"))
+	err := s.conn.writeRecordLocked(recordTypeChangeCipherSpec, msgData, s)
 	if err != nil {
 		return err
 	}
