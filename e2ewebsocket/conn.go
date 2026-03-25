@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/openimsdk/protocol/sdkws"
-	"google.golang.org/protobuf/proto"
 	im_parser "github.com/albert/ws_client/e2ewebsocket/im_parser"
 )
 
@@ -393,14 +391,17 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 		session = NewSession(sessionId, remoteId, c)
 		actual, _ := c.sessions.LoadOrStore(sessionId, session)
 		session = actual.(*Session)
-		if err := session.Handshake(); err != nil {
-			c.terminateSession(session, err)
-			return err
-		}
 	}
 
-	if !session.isHandshakeComplete.Load() {
-		return errors.New("[Write] handshake not complete")
+	// 无条件调用 Handshake() 确保握手完成。以前是 session 为 nil 的时候才调用。
+	// Handshake() 内部有 sync.Mutex 保护并做了 isHandshakeComplete 检查：
+	// 1. 若已经完成，会由快路径瞬间返回 nil。
+	// 2. 若当前协程是该会话发起者，会执行并完成握手。
+	// 3. 若正在被后台的被动握手协程（由 readLoop 触发）处理中，则会优雅地阻塞等待其完成。
+	// 这样绝对避免了并发握手时的业务消息丢包。
+	if err := session.Handshake(); err != nil {
+		c.terminateSession(session, err)
+		return err
 	}
 
 	// 改动4：这里不再传入message，而是传入MsgData
@@ -525,32 +526,6 @@ func (c *Conn) IsNil() bool {
 		return false
 	}
 	return true
-}
-
-func (c *Conn) parseReceivedMsgOPENIM(msg []byte) (string, error) {
-
-	// 解压
-	decompressMsg, err := c.config.compressor().DecompressWithPool(msg)
-	if err != nil {
-		log.Printf("解压消息失败: %v", err)
-		return "", err
-	}
-
-	// 解码
-	var req Req
-	err = c.config.encoder().Decode(decompressMsg, &req)
-	if err != nil {
-		log.Printf("解码消息失败: %v", err)
-		return "", err
-	}
-
-	// 反序列化
-	var msgData sdkws.MsgData
-	if err := proto.Unmarshal(req.Data, &msgData); err != nil {
-		return "", err
-	}
-
-	return msgData.RecvID, nil
 }
 
 func getSessionID(A, B string) SessionID {

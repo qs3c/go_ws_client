@@ -3,20 +3,16 @@ package e2ewebsocket
 import (
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/albert/ws_client/crypto"
 	"github.com/albert/ws_client/encoder"
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
-	openimmarshal "github.com/albert/ws_client/e2ewebsocket/im_parser/openim_marshal"
 )
 
 // MsgData 的 Mock 结构，为了构建有效的 WriteMessage 输入
@@ -36,35 +32,36 @@ import (
 // conns[1] 和 conns[2] 收到的消息转发给 conns[0]
 type mockServer struct {
 	mu    sync.Mutex
-	conns []*websocket.Conn
+	conns map[string]*websocket.Conn
 }
 
 func newMockServer() *mockServer {
 	return &mockServer{
-		conns: make([]*websocket.Conn, 0),
+		conns: make(map[string]*websocket.Conn),
 	}
 }
 
 func (s *mockServer) handler(w http.ResponseWriter, r *http.Request) {
+	// uid = hostId
+	uid := r.URL.Query().Get("uid")
 	upgrader := websocket.Upgrader{}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 
-	s.mu.Lock()
-	s.conns = append(s.conns, conn)
-	s.mu.Unlock()
+	if uid != "" {
+		s.mu.Lock()
+		s.conns[uid] = conn
+		s.mu.Unlock()
+	}
 
 	defer func() {
-		s.mu.Lock()
-		for i, c := range s.conns {
-			if c == conn {
-				s.conns = append(s.conns[:i], s.conns[i+1:]...)
-				break
-			}
+		if uid != "" {
+			s.mu.Lock()
+			delete(s.conns, uid)
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 		conn.Close()
 	}()
 
@@ -77,7 +74,7 @@ func (s *mockServer) handler(w http.ResponseWriter, r *http.Request) {
 		if len(msg) < 1 {
 			continue // 丢弃不合法消息
 		}
-		
+
 		// == Transform Req to Resp for application data ==
 		// 解码客户端发来的 Req
 		var req Req
@@ -106,15 +103,20 @@ func (s *mockServer) handler(w http.ResponseWriter, r *http.Request) {
 				newMsg[0] = msg[0]
 				copy(newMsg[1:], newPayload)
 				msg = newMsg
+
+				// 精准投递（附带并发写保护，防止 gorilla/websocket 崩溃）
+				s.mu.Lock()
+				targetConn := s.conns[msgData.RecvID]
+				if targetConn != nil {
+					targetConn.WriteMessage(mt, msg)
+				}
+				s.mu.Unlock()
+			} else {
+				fmt.Printf("MOCK SERVER UNMARSHAL ERR: %v\n", err)
 			}
+		} else {
+			fmt.Printf("MOCK SERVER DECODE REQ ERR: %v\n", err)
 		}
-		s.mu.Lock()
-		for _, targetConn := range s.conns {
-			if targetConn != conn {
-				targetConn.WriteMessage(mt, msg)
-			}
-		}
-		s.mu.Unlock()
 	}
 }
 
@@ -192,190 +194,6 @@ func makeAppMsg(t *testing.T, from, to string, content []byte) []byte {
 	// 为了测试方便，我们可以不压缩? 不行，conn.go:340 会报错
 	// 我们需要在测试中配置一个 "NoOp" Compressor 或者使用真实的 Gzip
 	return payload
-}
-
-func TestE2E_Concurrent(t *testing.T) {
-	// 1. 环境准备
-	// 假设密钥已经在之前的步骤中生成好并保存在 ../static_key 目录下
-	cwd, _ := os.Getwd()
-	keyStorePath := filepath.Join(filepath.Dir(cwd), "static_key")
-	if _, err := os.Stat(keyStorePath); os.IsNotExist(err) {
-		t.Skipf("static_key 目录不存在于 %s, 请先运行 TestGenerateStaticKeys 生成密钥", keyStorePath)
-	}
-
-	// 2. 启动 Mock Server
-	ms := newMockServer()
-	s := httptest.NewServer(http.HandlerFunc(ms.handler))
-	defer s.Close()
-	wsUrl := "ws" + strings.TrimPrefix(s.URL, "http")
-
-	// 3. 配置 Config
-	mockComp := &MockCompressor{}
-
-	cfgAlice := &Config{
-		KeyStorePath: keyStorePath,
-		Compressor:   mockComp,
-		Encoder:      encoder.NewGobEncoder(),
-	}
-	cfgBob := &Config{
-		KeyStorePath: keyStorePath,
-		Compressor:   mockComp,
-		Encoder:      encoder.NewGobEncoder(),
-	}
-
-	// 4. 连接
-	// 按照顺序连接，保证 conns 数组里面的顺序：[1111111111, 2222222222]
-	wsAlice, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
-	connAlice, err := NewSecureConn(wsAlice, "1111111111", cfgAlice, parser)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connAlice.Close()
-
-	wsBob, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	connBob, err := NewSecureConn(wsBob, "2222222222", cfgBob, parser)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connBob.Close()
-
-	// 等待 mock server 将两个连接都加入 conns 数组
-	time.Sleep(100 * time.Millisecond)
-
-	// 5. 并发读写测试
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Alice (1111111111) 循环发送消息，只发送给 Bob
-	go func() {
-		for i := 0; i < 3; i++ {
-			originalText := fmt.Sprintf("Hello 2222222222 %d", i)
-			payload := makeAppMsg(t, "1111111111", "2222222222", []byte(originalText))
-
-			err := connAlice.WriteMessage(websocket.BinaryMessage, payload)
-			if err != nil {
-				t.Errorf("Alice write failed: %v", err)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
-
-	// Bob 循环读取消息并回复
-	go func() {
-		defer wg.Done()
-		count := 0
-		for {
-			fmt.Println("Bob waiting to read...")
-			_, msg, err := connBob.ReadMessage()
-			fmt.Println("Bob read", len(msg), err)
-			if err != nil {
-				return
-			}
-
-			var resp Resp
-			dec := encoder.NewGobEncoder()
-			if err := dec.Decode(msg, &resp); err != nil {
-				t.Errorf("Bob decode msg to Resp failed: %v", err)
-				return
-			}
-			var pushMsg sdkws.PushMessages
-			if err := proto.Unmarshal(resp.Data, &pushMsg); err != nil {
-				t.Errorf("Bob unmarshal PushMessages failed: %v", err)
-				return
-			}
-			var msgData *sdkws.MsgData
-			for _, pull := range pushMsg.Msgs {
-				for _, m := range pull.Msgs {
-					msgData = m
-				}
-			}
-			if msgData == nil {
-				continue
-			}
-
-			text := string(msgData.Content)
-			if !strings.Contains(text, "Hello 2222222222") {
-				t.Errorf("Bob received unexpected text: %s", text)
-			}
-
-			count++
-			// 回复 Alice
-			replyText := fmt.Sprintf("2222222222 reply to %s", text)
-			replyPayload := makeAppMsg(t, "2222222222", "1111111111", []byte(replyText))
-			connBob.WriteMessage(websocket.BinaryMessage, replyPayload)
-
-			if count == 3 {
-				return
-			}
-		}
-	}()
-
-	// Alice 接收所有的回复
-	go func() {
-		defer wg.Done()
-		count := 0
-		for {
-			fmt.Println("Alice waiting to read...")
-			_, msg, err := connAlice.ReadMessage()
-			fmt.Println("Alice read", len(msg), err)
-			if err != nil {
-				return
-			}
-
-			var resp Resp
-			dec := encoder.NewGobEncoder()
-			if err := dec.Decode(msg, &resp); err != nil {
-				t.Errorf("Alice decode msg to Resp failed: %v", err)
-				return
-			}
-			var pushMsg sdkws.PushMessages
-			if err := proto.Unmarshal(resp.Data, &pushMsg); err != nil {
-				t.Errorf("Alice unmarshal PushMessages failed: %v", err)
-				return
-			}
-			var msgData *sdkws.MsgData
-			for _, pull := range pushMsg.Msgs {
-				for _, m := range pull.Msgs {
-					msgData = m
-				}
-			}
-			if msgData == nil {
-				continue
-			}
-
-			text := string(msgData.Content)
-			if !strings.Contains(text, "reply to") {
-				t.Errorf("Alice received unexpected text: %s", text)
-			}
-
-			count++
-			if count == 3 { // Bob * 3
-				return
-			}
-		}
-	}()
-
-	// Wait with timeout
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// Success
-	case <-time.After(5 * time.Second):
-		t.Fatal("Test timed out")
-	}
 }
 
 type MockCompressor struct{}

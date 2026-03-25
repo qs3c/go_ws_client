@@ -20,17 +20,8 @@ import (
 
 // TestE2E_MultiPeer 测试 Alice 同时与 Bob 和 Catherine 进行 E2E 加密通信。
 //
-// 由于当前 wire 格式中消息头不含 recvId，单台广播 mock server 无法精准路由消息，
-// 会导致第三方（如 Bob 收到 Alice→Catherine 的包）解密失败并发送 alert，
-// 从而终止对端的正常 session。
-//
-// "作弊"方案：给每对通信双方分配一台独立的 mock server。
-//
-//	server_AB  → Alice(connAB) + Bob     （只有两个连接，广播即精准路由）
-//	server_AC  → Alice(connAC) + Catherine（只有两个连接，广播即精准路由）
-//
-// Alice 使用两个 Conn 对象并发运行，分别代表她与 Bob 和与 Catherine 的会话。
-// 两组会话完全并发，互不干扰。
+// Alice 使用单个 Conn 对象并发运行，分别代表她与 Bob 和与 Catherine 的会话。
+// 两组会话完全并发，共用一条 WebSocket 物理连接通道，互不干扰。
 //
 // 验证点：
 //   - Alice ↔ Bob E2E 握手、加密通信
@@ -51,7 +42,7 @@ func TestE2E_MultiPeer(t *testing.T) {
 	mockComp := &MockCompressor{}
 	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
 	newConn := func(wsURL, hostId string) *Conn {
-		ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		ws, _, err := websocket.DefaultDialer.Dial(wsURL+"?uid="+hostId, nil)
 		if err != nil {
 			t.Fatalf("[%s] Dial(%s) failed: %v", hostId, wsURL, err)
 		}
@@ -66,28 +57,20 @@ func TestE2E_MultiPeer(t *testing.T) {
 		return conn
 	}
 
-	// 3. 启动两台专属 mock server
-	// ── Server AB：只有 Alice 和 Bob ──────────────────────────────────────
-	srvAB := httptest.NewServer(http.HandlerFunc(newMockServer().handler))
-	defer srvAB.Close()
-	urlAB := "ws" + strings.TrimPrefix(srvAB.URL, "http")
-
-	// ── Server AC：只有 Alice 和 Catherine ────────────────────────────────
-	srvAC := httptest.NewServer(http.HandlerFunc(newMockServer().handler))
-	defer srvAC.Close()
-	urlAC := "ws" + strings.TrimPrefix(srvAC.URL, "http")
+	// 3. 启动一专属 mock server
+	// ── Server：所有连接共享一个 server，基于精确路由投递 ───────────────────
+	srv := httptest.NewServer(http.HandlerFunc(newMockServer().handler))
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	// 4. 各方连接
-	connAliceAB := newConn(urlAB, "1111111111") // Alice 连接至 server_AB（与 Bob 通信）
-	defer connAliceAB.Close()
+	connAlice := newConn(url, "1111111111") // Alice 核心单连接
+	defer connAlice.Close()
 
-	connBob := newConn(urlAB, "2222222222") // Bob 连接至 server_AB
+	connBob := newConn(url, "2222222222") // Bob 连接
 	defer connBob.Close()
 
-	connAliceAC := newConn(urlAC, "1111111111") // Alice 连接至 server_AC（与 Catherine 通信）
-	defer connAliceAC.Close()
-
-	connCatherine := newConn(urlAC, "3333333333") // Catherine 连接至 server_AC
+	connCatherine := newConn(url, "3333333333") // Catherine 连接
 	defer connCatherine.Close()
 
 	// 等待 mock server 注册完所有连接
@@ -119,24 +102,29 @@ func TestE2E_MultiPeer(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	// ── 会话 AB：Alice ↔ Bob ──────────────────────────────────────────────
-
-	// Alice 向 Bob 发送 msgCount 条消息
+	// ── 并发发送：Alice → Bob / Catherine ───────────────────────────────
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < msgCount; i++ {
-			payload := makeAppMsg(t, "1111111111", "2222222222",
+			// 发给 Bob
+			payloadBob := makeAppMsg(t, "1111111111", "2222222222",
 				[]byte(fmt.Sprintf("Alice to Bob #%d", i)))
-			if err := connAliceAB.WriteMessage(websocket.BinaryMessage, payload); err != nil {
-				t.Errorf("Alice(AB) → Bob write[%d] failed: %v", i, err)
-				return
+			if err := connAlice.WriteMessage(websocket.BinaryMessage, payloadBob); err != nil {
+				t.Errorf("Alice → Bob write[%d] failed: %v", i, err)
+			}
+            
+			// 发给 Catherine
+			payloadCat := makeAppMsg(t, "1111111111", "3333333333",
+				[]byte(fmt.Sprintf("Alice to Catherine #%d", i)))
+			if err := connAlice.WriteMessage(websocket.BinaryMessage, payloadCat); err != nil {
+				t.Errorf("Alice → Catherine write[%d] failed: %v", i, err)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 
-	// Bob 接收并回复
+	// ── 接收并回复：Bob ──────────────────────────────────────────────────
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -163,44 +151,7 @@ func TestE2E_MultiPeer(t *testing.T) {
 		t.Logf("Bob: replied %d messages", received)
 	}()
 
-	// Alice 接收 Bob 的回复
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		received := 0
-		for received < msgCount {
-			_, raw, err := connAliceAB.ReadMessage()
-			if err != nil {
-				t.Errorf("Alice(AB) ReadMessage failed: %v", err)
-				return
-			}
-			text, ok := decodeMsg(raw)
-			if !ok || !strings.Contains(text, "Bob reply") {
-				continue
-			}
-			received++
-			t.Logf("Alice ← Bob reply[%d]: %s", received, text)
-		}
-	}()
-
-	// ── 会话 AC：Alice ↔ Catherine ────────────────────────────────────────
-
-	// Alice 向 Catherine 发送 msgCount 条消息
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < msgCount; i++ {
-			payload := makeAppMsg(t, "1111111111", "3333333333",
-				[]byte(fmt.Sprintf("Alice to Catherine #%d", i)))
-			if err := connAliceAC.WriteMessage(websocket.BinaryMessage, payload); err != nil {
-				t.Errorf("Alice(AC) → Catherine write[%d] failed: %v", i, err)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
-
-	// Catherine 接收并回复
+    // ── 接收并回复：Catherine ────────────────────────────────────────────
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -227,23 +178,29 @@ func TestE2E_MultiPeer(t *testing.T) {
 		t.Logf("Catherine: replied %d messages", received)
 	}()
 
-	// Alice 接收 Catherine 的回复
+	// ── 统一收取回包：Alice ──────────────────────────────────────────────
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		received := 0
-		for received < msgCount {
-			_, raw, err := connAliceAC.ReadMessage()
+		receivedBob := 0
+		receivedCat := 0
+		for (receivedBob + receivedCat) < msgCount*2 {
+			_, raw, err := connAlice.ReadMessage()
 			if err != nil {
-				t.Errorf("Alice(AC) ReadMessage failed: %v", err)
+				t.Errorf("Alice ReadMessage failed: %v", err)
 				return
 			}
 			text, ok := decodeMsg(raw)
-			if !ok || !strings.Contains(text, "Catherine reply") {
+			if !ok {
 				continue
 			}
-			received++
-			t.Logf("Alice ← Catherine reply[%d]: %s", received, text)
+			if strings.Contains(text, "Bob reply") {
+				receivedBob++
+				t.Logf("Alice ← Bob reply[%d]: %s", receivedBob, text)
+			} else if strings.Contains(text, "Catherine reply") {
+				receivedCat++
+				t.Logf("Alice ← Catherine reply[%d]: %s", receivedCat, text)
+			}
 		}
 	}()
 
@@ -256,7 +213,7 @@ func TestE2E_MultiPeer(t *testing.T) {
 
 	select {
 	case <-done:
-		t.Log("TestE2E_MultiPeer PASSED - Alice ↔ Bob 和 Alice ↔ Catherine 并发通信均成功")
+		t.Log("TestE2E_MultiPeer PASSED - Alice 使用单条连接与 Bob 和 Catherine 并发通信均成功")
 	case <-time.After(15 * time.Second):
 		t.Fatal("TestE2E_MultiPeer timed out")
 	}
