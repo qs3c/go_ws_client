@@ -8,13 +8,13 @@ import (
 
 type OpenIMParser struct {
 	encoder    encoder.Encoder
-	compresser compressor.Compressor
+	compressor compressor.Compressor
 }
 
-func NewOpenIMParser(encoder encoder.Encoder, compresser compressor.Compressor) *OpenIMParser {
+func NewOpenIMParser(encoder encoder.Encoder, compressor compressor.Compressor) *OpenIMParser {
 	return &OpenIMParser{
 		encoder:    encoder,
-		compresser: compresser,
+		compressor: compressor,
 	}
 }
 
@@ -45,6 +45,13 @@ type Message struct {
 // 使用指针嵌入避免复制 protobuf 内部的 sync.Mutex
 type MsgData struct {
 	*sdkws.MsgData
+
+	// Write 方向复用结构体
+	Req *Req // 保存原始的 Req，以便写回时复用
+
+	// Read 方向复用结构体
+	Resp    *Resp               // 保存原始的 Resp，以便写回时复用
+	PushMsg *sdkws.PushMessages // 保存原始的 PushMsg，以便写回时复用
 }
 
 func (m *MsgData) GetSendID() string {

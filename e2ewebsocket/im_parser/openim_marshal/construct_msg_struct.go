@@ -16,7 +16,7 @@ var offlinePushInfo = &sdkws.OfflinePushInfo{
 	// 其他未提及的字段默认空值
 }
 
-func ConstructMsgData(sendID, recvID string, msg []byte) *MsgData {
+func (p *OpenIMParser) ConstructMsgData(sendID, recvID string, msg []byte) *MsgData {
 
 	clientMsgID, err := randomString(32)
 	if err != nil {
@@ -42,21 +42,6 @@ func ConstructMsgData(sendID, recvID string, msg []byte) *MsgData {
 		},
 	}
 	return msgData
-}
-
-// 1 握手消息
-func ConstructHandshakeMsg(sendID, recvID string, msg []byte) *MsgData {
-	return ConstructMsgData(sendID, recvID, msg)
-}
-
-// 2. CCS 消息
-func ConstructCCSMsg(sendID, recvID string) *MsgData {
-	return ConstructMsgData(sendID, recvID, []byte("CCS"))
-}
-
-// 3. Alter 消息
-func ConstructAlterMsg(sendID, recvID string) *MsgData {
-	return ConstructMsgData(sendID, recvID, []byte("Alter"))
 }
 
 func randomString(length int) (string, error) {

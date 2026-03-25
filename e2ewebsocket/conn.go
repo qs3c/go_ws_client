@@ -100,7 +100,7 @@ func (c *Conn) readRecord() error {
 		return nil
 	}
 	typ := recordType(msg[0])
-	msgData, err := c.imParser.MsgDataFromServerReadBound(msg[1:])
+	msgData, err := c.imParser.BytesToMsgDataReadBound(msg[1:])
 	if err != nil {
 		log.Printf("readLoop MsgDataFromServerReadBound error: %v", err)
 		return err
@@ -177,7 +177,7 @@ func (c *Conn) readRecord() error {
 			}
 		}
 		// 正常向上层传递应用数据记录
-		msgDataBytes, err := c.imParser.MsgDataToServerReadBound(msgData)
+		msgDataBytes, err := c.imParser.MsgDataToBytesReadBound(msgData)
 		if err != nil {
 			log.Printf("readLoop MsgDataToServerReadBound error: %v", err)
 			return err
@@ -367,7 +367,7 @@ func (c *Conn) WriteMessage(messageType int, message []byte) error {
 	// 		return err
 	// 	}
 	// }
-	msgData, err := c.imParser.MsgDataFromServerWriteBound(message)
+	msgData, err := c.imParser.BytesToMsgDataWriteBound(message)
 	if err != nil {
 		return err
 	}
@@ -433,7 +433,7 @@ func (c *Conn) writeRecordLocked(typ recordType, msgData im_parser.MsgData, sess
 
 	// 改造7：重新序列化 MsgData 成 outBuf
 	// 发送
-	msgDataBytes, err := c.imParser.MsgDataToServerWriteBound(msgData)
+	msgDataBytes, err := c.imParser.MsgDataToBytesWriteBound(msgData)
 	if err != nil {
 		return err
 	}
