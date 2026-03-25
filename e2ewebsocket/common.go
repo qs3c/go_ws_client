@@ -105,6 +105,7 @@ const (
 	// 只保留两种 握手数据类型和应用数据类型
 	// 至于 Close 类型的在更外层也就是 ws 的 msgType 那一级处理了
 	// msgType 中的二进制数据再细分为 握手和应用两种
+	recordTypeAlert            recordType = 21
 	recordTypeHandshake        recordType = 22
 	recordTypeApplicationData  recordType = 23
 	recordTypeChangeCipherSpec recordType = 24
@@ -145,6 +146,12 @@ const (
 var supportedVersions = []uint16{
 	VersionE2E1,
 	VersionE2E2,
+}
+
+// #################### 后续这种 default 类的可以统一转移到 default.go 中去
+var defaultSupportedSignatureAlgorithms = []SignatureScheme{
+	SM2WithSM3,
+	// 还可以根据业务需求增加其他算法
 }
 
 type Config struct {
