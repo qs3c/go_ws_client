@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/openimsdk/protocol/sdkws"
+	imparser "github.com/albert/ws_client/e2ewebsocket/im_parser"
 )
 
 var offlinePushInfo = &sdkws.OfflinePushInfo{
@@ -16,7 +17,7 @@ var offlinePushInfo = &sdkws.OfflinePushInfo{
 	// 其他未提及的字段默认空值
 }
 
-func (p *OpenIMParser) ConstructMsgData(sendID, recvID string, msg []byte) *MsgData {
+func (p *OpenIMParser) ConstructMsgData(sendID, recvID string, msg []byte) imparser.MsgData {
 
 	clientMsgID, err := randomString(32)
 	if err != nil {

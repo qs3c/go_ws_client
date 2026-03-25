@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
+	openimmarshal "github.com/albert/ws_client/e2ewebsocket/im_parser/openim_marshal"
 )
 
 // TestE2E_MultiPeer 测试 Alice 同时与 Bob 和 Catherine 进行 E2E 加密通信。
@@ -48,6 +49,7 @@ func TestE2E_MultiPeer(t *testing.T) {
 
 	// 2. 辅助函数：建立安全连接
 	mockComp := &MockCompressor{}
+	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
 	newConn := func(wsURL, hostId string) *Conn {
 		ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 		if err != nil {
@@ -57,7 +59,7 @@ func TestE2E_MultiPeer(t *testing.T) {
 			KeyStorePath: keyStorePath,
 			Compressor:   mockComp,
 			Encoder:      encoder.NewGobEncoder(),
-		})
+		}, parser)
 		if err != nil {
 			t.Fatalf("[%s] NewSecureConn failed: %v", hostId, err)
 		}
@@ -95,12 +97,21 @@ func TestE2E_MultiPeer(t *testing.T) {
 
 	// decodeMsg 解析收到的原始字节并返回文本内容
 	decodeMsg := func(raw []byte) (string, bool) {
-		var req Req
-		if err := encoder.NewGobEncoder().Decode(raw, &req); err != nil {
+		var resp Resp
+		if err := encoder.NewGobEncoder().Decode(raw, &resp); err != nil {
 			return "", false
 		}
-		var md sdkws.MsgData
-		if err := proto.Unmarshal(req.Data, &md); err != nil {
+		var pushMsg sdkws.PushMessages
+		if err := proto.Unmarshal(resp.Data, &pushMsg); err != nil {
+			return "", false
+		}
+		var md *sdkws.MsgData
+		for _, pull := range pushMsg.Msgs {
+			for _, m := range pull.Msgs {
+				md = m
+			}
+		}
+		if md == nil {
 			return "", false
 		}
 		return string(md.Content), true

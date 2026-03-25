@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
+	imparser "github.com/albert/ws_client/e2ewebsocket/im_parser"
 )
 
 // var (
@@ -18,7 +19,7 @@ import (
 // WriteBound 是 =>Server 方向的，与 Req 打交道
 
 // []byte => MsgData 【反解出来拿Content去加密】
-func (p *OpenIMParser) BytesToMsgDataWriteBound(data []byte) (*MsgData, error) {
+func (p *OpenIMParser) BytesToMsgDataWriteBound(data []byte) (imparser.MsgData, error) {
 	// 解压解码
 	req, err := p.decodeAndDecompressWriteBound(data)
 	if err != nil {
@@ -43,7 +44,11 @@ func (p *OpenIMParser) BytesToMsgDataWriteBound(data []byte) (*MsgData, error) {
 }
 
 // MsgData => []byte 【加密完Content再重新序列化】
-func (p *OpenIMParser) MsgDataToBytesWriteBound(msgData *MsgData) ([]byte, error) {
+func (p *OpenIMParser) MsgDataToBytesWriteBound(msgi imparser.MsgData) ([]byte, error) {
+	msgData, ok := msgi.(*MsgData)
+	if !ok {
+		return nil, fmt.Errorf("invalid MsgData format")
+	}
 	// ******************
 	if msgData == nil || msgData.MsgData == nil {
 		return nil, fmt.Errorf("msgData 或其内部 MsgData 为 nil")

@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
+	openimmarshal "github.com/albert/ws_client/e2ewebsocket/im_parser/openim_marshal"
 )
 
 // MsgData 的 Mock 结构，为了构建有效的 WriteMessage 输入
@@ -72,9 +73,40 @@ func (s *mockServer) handler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
-		// 根据消息协议：首字节(类型) + 10字节(发送者ID)
-		if len(msg) < 11 {
+		// 根据消息协议：首字节(类型)
+		if len(msg) < 1 {
 			continue // 丢弃不合法消息
+		}
+		
+		// == Transform Req to Resp for application data ==
+		// 解码客户端发来的 Req
+		var req Req
+		enc := encoder.NewGobEncoder()
+		payload := msg[1:]
+		if err := enc.Decode(payload, &req); err == nil && len(req.Data) > 0 {
+			// 能解码成 Req 的大概率是业务消息，转换为 Resp 发出
+			var msgData sdkws.MsgData
+			if err := proto.Unmarshal(req.Data, &msgData); err == nil {
+				pushMsg := &sdkws.PushMessages{
+					Msgs: map[string]*sdkws.PullMsgs{
+						msgData.RecvID: {
+							Msgs: []*sdkws.MsgData{&msgData},
+						},
+					},
+				}
+				pbBytes, _ := proto.Marshal(pushMsg)
+				resp := Resp{
+					ReqIdentifier: req.ReqIdentifier,
+					MsgIncr:       req.MsgIncr,
+					OperationID:   req.OperationID,
+					Data:          pbBytes,
+				}
+				newPayload, _ := enc.Encode(resp)
+				newMsg := make([]byte, 1+len(newPayload))
+				newMsg[0] = msg[0]
+				copy(newMsg[1:], newPayload)
+				msg = newMsg
+			}
 		}
 		s.mu.Lock()
 		for _, targetConn := range s.conns {
@@ -197,7 +229,8 @@ func TestE2E_Concurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	connAlice, err := NewSecureConn(wsAlice, "1111111111", cfgAlice)
+	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
+	connAlice, err := NewSecureConn(wsAlice, "1111111111", cfgAlice, parser)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +240,7 @@ func TestE2E_Concurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	connBob, err := NewSecureConn(wsBob, "2222222222", cfgBob)
+	connBob, err := NewSecureConn(wsBob, "2222222222", cfgBob, parser)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,18 +273,31 @@ func TestE2E_Concurrent(t *testing.T) {
 		defer wg.Done()
 		count := 0
 		for {
+			fmt.Println("Bob waiting to read...")
 			_, msg, err := connBob.ReadMessage()
+			fmt.Println("Bob read", len(msg), err)
 			if err != nil {
 				return
 			}
 
-			var req Req
+			var resp Resp
 			dec := encoder.NewGobEncoder()
-			if err := dec.Decode(msg, &req); err != nil {
-				continue
+			if err := dec.Decode(msg, &resp); err != nil {
+				t.Errorf("Bob decode msg to Resp failed: %v", err)
+				return
 			}
-			var msgData sdkws.MsgData
-			if err := proto.Unmarshal(req.Data, &msgData); err != nil {
+			var pushMsg sdkws.PushMessages
+			if err := proto.Unmarshal(resp.Data, &pushMsg); err != nil {
+				t.Errorf("Bob unmarshal PushMessages failed: %v", err)
+				return
+			}
+			var msgData *sdkws.MsgData
+			for _, pull := range pushMsg.Msgs {
+				for _, m := range pull.Msgs {
+					msgData = m
+				}
+			}
+			if msgData == nil {
 				continue
 			}
 
@@ -277,18 +323,31 @@ func TestE2E_Concurrent(t *testing.T) {
 		defer wg.Done()
 		count := 0
 		for {
+			fmt.Println("Alice waiting to read...")
 			_, msg, err := connAlice.ReadMessage()
+			fmt.Println("Alice read", len(msg), err)
 			if err != nil {
 				return
 			}
 
-			var req Req
+			var resp Resp
 			dec := encoder.NewGobEncoder()
-			if err := dec.Decode(msg, &req); err != nil {
-				continue
+			if err := dec.Decode(msg, &resp); err != nil {
+				t.Errorf("Alice decode msg to Resp failed: %v", err)
+				return
 			}
-			var msgData sdkws.MsgData
-			if err := proto.Unmarshal(req.Data, &msgData); err != nil {
+			var pushMsg sdkws.PushMessages
+			if err := proto.Unmarshal(resp.Data, &pushMsg); err != nil {
+				t.Errorf("Alice unmarshal PushMessages failed: %v", err)
+				return
+			}
+			var msgData *sdkws.MsgData
+			for _, pull := range pushMsg.Msgs {
+				for _, m := range pull.Msgs {
+					msgData = m
+				}
+			}
+			if msgData == nil {
 				continue
 			}
 

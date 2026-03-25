@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
+	openimmarshal "github.com/albert/ws_client/e2ewebsocket/im_parser/openim_marshal"
 )
 
 // 极简单次握手 + 一条消息测试
@@ -38,7 +39,8 @@ func TestE2E_SingleMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	connAlice, err := NewSecureConn(wsAlice, "1111111111", cfgAlice)
+	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
+	connAlice, err := NewSecureConn(wsAlice, "1111111111", cfgAlice, parser)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +50,7 @@ func TestE2E_SingleMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	connBob, err := NewSecureConn(wsBob, "2222222222", cfgBob)
+	connBob, err := NewSecureConn(wsBob, "2222222222", cfgBob, parser)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,14 +124,23 @@ func TestE2E_SingleMessage(t *testing.T) {
 	}
 
 	// 解码验证
-	var recvReq Req
+	var recvResp Resp
 	dec := encoder.NewGobEncoder()
-	if err := dec.Decode(recvMsg, &recvReq); err != nil {
+	if err := dec.Decode(recvMsg, &recvResp); err != nil {
 		t.Fatalf("Bob decode failed: %v", err)
 	}
-	var recvMsgData sdkws.MsgData
-	if err := proto.Unmarshal(recvReq.Data, &recvMsgData); err != nil {
+	var pushMsg sdkws.PushMessages
+	if err := proto.Unmarshal(recvResp.Data, &pushMsg); err != nil {
 		t.Fatalf("Bob unmarshal failed: %v", err)
+	}
+	var recvMsgData *sdkws.MsgData
+	for _, pull := range pushMsg.Msgs {
+		for _, m := range pull.Msgs {
+			recvMsgData = m
+		}
+	}
+	if recvMsgData == nil {
+		t.Fatalf("Bob received empty messages")
 	}
 	if string(recvMsgData.Content) != "hello from alice" {
 		t.Fatalf("content mismatch: got %s", recvMsgData.Content)

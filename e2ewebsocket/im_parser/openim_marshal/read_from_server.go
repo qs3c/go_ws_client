@@ -9,12 +9,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
+	imparser "github.com/albert/ws_client/e2ewebsocket/im_parser"
 )
 
 // ReadBound 是 Server=> 方向的，与 Resp 打交道
 
 // []byte => MsgData 【先解出来拿Content去解密】
-func (p *OpenIMParser) BytesToMsgDataReadBound(data []byte) (*MsgData, error) {
+func (p *OpenIMParser) BytesToMsgDataReadBound(data []byte) (imparser.MsgData, error) {
 
 	resp, err := p.decodeAndDecompressReadBound(data)
 	if err != nil {
@@ -43,7 +44,11 @@ func (p *OpenIMParser) BytesToMsgDataReadBound(data []byte) (*MsgData, error) {
 }
 
 // MsgData => []byte 【解密完Content再重新序列化提供给上层】
-func (p *OpenIMParser) MsgDataToBytesServerReadBound(msgData *MsgData) ([]byte, error) {
+func (p *OpenIMParser) MsgDataToBytesReadBound(msgi imparser.MsgData) ([]byte, error) {
+	msgData, ok := msgi.(*MsgData)
+	if !ok {
+		return nil, fmt.Errorf("invalid MsgData format")
+	}
 	if msgData == nil || msgData.MsgData == nil {
 		return nil, fmt.Errorf("msgData 或其内部 MsgData 为 nil")
 	}
