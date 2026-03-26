@@ -19,23 +19,26 @@ type Conn struct {
 	sessions sync.Map
 	msgChan  chan readMsgItem
 
-	// parseReceivedMsg func([]byte) (string, error)
 	imParser im_parser.IMParser
 	writeMu  sync.Mutex
+
+	// readLoop 等待/唤醒机制
+	connMu   sync.Mutex // 保护 conn 和 closed 字段
+	connCond *sync.Cond // readLoop 等待 conn 就绪的条件变量
+	closed   bool       // 标记 Conn 是否已被 Close
 }
 
-func NewSecureConn(wsconn *websocket.Conn, hostId string, config *Config, imParser im_parser.IMParser) (*Conn, error) {
-	// ############ 是否需要增加对其他入参的检查？哪些是必填的哪些不是？
+func NewSecureConn(hostId string, config *Config, imParser im_parser.IMParser) (*Conn, error) {
 	if imParser == nil {
 		return nil, errors.New("imParser is nil")
 	}
 	c := &Conn{
-		conn:    wsconn,
-		hostId:  hostId,
-		config:  config,
-		msgChan: make(chan readMsgItem, 128),
+		hostId:   hostId,
+		config:   config,
+		msgChan:  make(chan readMsgItem, 128),
 		imParser: imParser,
 	}
+	c.connCond = sync.NewCond(&c.connMu)
 	go c.readLoop()
 	return c, nil
 }
@@ -55,32 +58,54 @@ func (c *Conn) readLoop() {
 		if r := recover(); r != nil {
 			log.Printf("readLoop panic: %v", r)
 		}
-		// 关闭所有 session 的握手消息通道
-		c.sessions.Range(func(key, value any) bool {
-			session := value.(*Session)
-			session.Close()
-			return true
-		})
-		// 关闭 conn 的应用消息通道
-		close(c.msgChan)
-		// 关闭底层 ws 连接
-		c.Close()
 		log.Println("readLoop exited")
 	}()
 
 	for {
-		if err := c.readRecord(); err != nil {
+		// 等待 conn 就绪（首次连接或重连后）
+		c.connMu.Lock()
+		for c.conn == nil && !c.closed {
+			// Wait() 会把当前 goroutine 放进等待队列然后让出调度
+			// 等 Signal() 通知了才唤醒
+			// 不会一直 for 循环，Wait()就是配合 for 循环使用的
+			c.connCond.Wait()
+		}
+		if c.closed {
+			c.connMu.Unlock()
 			return
 		}
-	}
+		conn := c.conn // 快照当前连接
+		c.connMu.Unlock()
 
+		// 用这个 conn 持续读
+		for {
+			if err := c.readRecord(); err != nil {
+				c.connMu.Lock()
+				if c.closed {
+					c.connMu.Unlock()
+					return
+				}
+				replaced := (c.conn != conn)
+				if !replaced {
+					// 真断线：置 nil，等待 Dial 重连
+					c.conn = nil
+				}
+				c.connMu.Unlock()
+				if !replaced {
+					// 真断线错误推给上层
+					c.msgChan <- readMsgItem{err: err}
+				}
+				// 无论是重连还是真断线，都回到外层等新 conn
+				break
+			}
+		}
+	}
 }
 
 func (c *Conn) readRecord() error {
 	msgType, msg, err := c.conn.ReadMessage()
 	if err != nil {
 		log.Printf("readLoop ReadMessage error: %v", err)
-		c.msgChan <- readMsgItem{err: err}
 		return err
 	}
 
@@ -486,40 +511,92 @@ func (c *Conn) writeRecordLocked(typ recordType, msgData im_parser.MsgData, sess
 // }
 
 func (c *Conn) Close() error {
-	return c.conn.Close()
+	c.connMu.Lock()
+	c.closed = true
+	var err error
+	if c.conn != nil {
+		err = c.conn.Close()
+		c.conn = nil
+	}
+	c.connCond.Signal() // 唤醒可能在等待的 readLoop，让它检查 closed 后退出
+	c.connMu.Unlock()
+
+	// 关闭所有 sessions
+	c.sessions.Range(func(key, value any) bool {
+		session := value.(*Session)
+		session.Close()
+		return true
+	})
+
+	return err
 }
 
+var errNotConnected = errors.New("not connected")
+
 func (c *Conn) SetReadDeadline(timeout time.Duration) error {
+	if c.conn == nil {
+		return errNotConnected
+	}
 	return c.conn.SetReadDeadline(time.Now().Add(timeout))
 }
 
 func (c *Conn) SetWriteDeadline(timeout time.Duration) error {
+	if c.conn == nil {
+		return errNotConnected
+	}
 	return c.conn.SetWriteDeadline(time.Now().Add(timeout))
 }
 
 func (c *Conn) SetReadLimit(limit int64) {
+	if c.conn == nil {
+		return
+	}
 	c.conn.SetReadLimit(limit)
-
 }
 
 func (c *Conn) SetPingHandler(handler PingPongHandler) {
+	if c.conn == nil {
+		return
+	}
 	c.conn.SetPingHandler(handler)
 }
 
 func (c *Conn) SetPongHandler(handler PingPongHandler) {
+	if c.conn == nil {
+		return
+	}
 	c.conn.SetPongHandler(handler)
 }
 
 func (c *Conn) LocalAddr() string {
+	if c.conn == nil {
+		return ""
+	}
 	return c.conn.LocalAddr().String()
 }
 
 func (c *Conn) Dial(urlStr string, requestHeader http.Header) (*http.Response, error) {
-	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
-	if err == nil {
-		c.conn = conn
+	c.connMu.Lock()
+	// 关闭旧的底层连接（如果存在），使阻塞的 ReadMessage 返回错误
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
 	}
-	return httpResp, err
+	c.connMu.Unlock()
+
+	// 建立新连接
+	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
+	if err != nil {
+		return httpResp, err
+	}
+
+	// 设置新连接并唤醒 readLoop
+	c.connMu.Lock()
+	c.conn = conn
+	c.connCond.Signal()
+	c.connMu.Unlock()
+
+	return httpResp, nil
 }
 
 func (c *Conn) IsNil() bool {

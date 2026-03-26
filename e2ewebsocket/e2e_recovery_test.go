@@ -72,17 +72,17 @@ func setupRecoveryTest(t *testing.T) (ms *mockServer, wsUrl string, keyStorePath
 	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
 
 	newConn = func(hostId string) *Conn {
-		ws, _, err := websocket.DefaultDialer.Dial(wsUrl+"?uid="+hostId, nil)
-		if err != nil {
-			t.Fatalf("[%s] Dial failed: %v", hostId, err)
-		}
-		conn, err := NewSecureConn(ws, hostId, &Config{
+		conn, err := NewSecureConn(hostId, &Config{
 			KeyStorePath: keyStorePath,
 			Compressor:   mockComp,
 			Encoder:      encoder.NewGobEncoder(),
 		}, parser)
 		if err != nil {
 			t.Fatalf("[%s] NewSecureConn failed: %v", hostId, err)
+		}
+		_, err = conn.Dial(wsUrl+"?uid="+hostId, nil)
+		if err != nil {
+			t.Fatalf("[%s] Dial failed: %v", hostId, err)
 		}
 		return conn
 	}

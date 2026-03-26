@@ -42,17 +42,17 @@ func TestE2E_MultiPeer(t *testing.T) {
 	mockComp := &MockCompressor{}
 	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
 	newConn := func(wsURL, hostId string) *Conn {
-		ws, _, err := websocket.DefaultDialer.Dial(wsURL+"?uid="+hostId, nil)
-		if err != nil {
-			t.Fatalf("[%s] Dial(%s) failed: %v", hostId, wsURL, err)
-		}
-		conn, err := NewSecureConn(ws, hostId, &Config{
+		conn, err := NewSecureConn(hostId, &Config{
 			KeyStorePath: keyStorePath,
 			Compressor:   mockComp,
 			Encoder:      encoder.NewGobEncoder(),
 		}, parser)
 		if err != nil {
 			t.Fatalf("[%s] NewSecureConn failed: %v", hostId, err)
+		}
+		_, err = conn.Dial(wsURL+"?uid="+hostId, nil)
+		if err != nil {
+			t.Fatalf("[%s] Dial(%s) failed: %v", hostId, wsURL, err)
 		}
 		return conn
 	}

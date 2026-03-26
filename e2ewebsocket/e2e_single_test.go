@@ -35,17 +35,17 @@ func TestE2E_PingPong(t *testing.T) {
 	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
 
 	newConn := func(wsURL, hostId string) *Conn {
-		ws, _, err := websocket.DefaultDialer.Dial(wsURL+"?uid="+hostId, nil)
-		if err != nil {
-			t.Fatalf("[%s] Dial failed: %v", hostId, err)
-		}
-		conn, err := NewSecureConn(ws, hostId, &Config{
+		conn, err := NewSecureConn(hostId, &Config{
 			KeyStorePath: keyStorePath,
 			Compressor:   mockComp,
 			Encoder:      encoder.NewGobEncoder(),
 		}, parser)
 		if err != nil {
 			t.Fatalf("[%s] NewSecureConn failed: %v", hostId, err)
+		}
+		_, err = conn.Dial(wsURL+"?uid="+hostId, nil)
+		if err != nil {
+			t.Fatalf("[%s] Dial failed: %v", hostId, err)
 		}
 		return conn
 	}
