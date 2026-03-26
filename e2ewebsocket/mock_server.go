@@ -120,6 +120,17 @@ func (s *mockServer) handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// injectRawToUID 直接向指定 uid 的 ws 连接写入原始二进制帧，用于测试注入
+func (s *mockServer) injectRawToUID(uid string, msg []byte) bool {
+	s.mu.Lock()
+	conn := s.conns[uid]
+	s.mu.Unlock()
+	if conn == nil {
+		return false
+	}
+	return conn.WriteMessage(websocket.BinaryMessage, msg) == nil
+}
+
 // 生成密钥对并保存到指定目录
 func setupKeyStore(t *testing.T, baseDir, id string) {
 	dir := filepath.Join(baseDir, id)

@@ -147,7 +147,8 @@ func (c *Conn) readRecord() error {
 		}
 		log.Printf("readLoop received alert from %s", senderId)
 		// 收到 Alert，直接销毁本地 Session
-		c.terminateSession(session, errors.New("received alert"))
+		// c.terminateSession(session, errors.New("received alert"))
+		c.closeSessionLocally(session, errors.New("received alert"))
 		return nil
 	// 收到来自 A 的应用数据记录
 	case recordTypeApplicationData:
@@ -563,6 +564,18 @@ func (c *Conn) terminateSession(session *Session, reason error) error {
 	log.Printf("Session %s terminated: %v", session.id, reason)
 	return reason
 }
+
+// 不发送 alter 消息版的 terminateSession
+// 本地出错误调用 terminateSession，接收到对方 alter 消息调用 closeSessionLocally
+func (c *Conn) closeSessionLocally(session *Session, reason error) {
+    if session == nil {
+        return
+    }
+    session.Close()
+    c.sessions.Delete(session.id)
+    log.Printf("Session %s closed locally: %v", session.id, reason)
+}
+
 
 // 重建session，自愈逻辑
 // func (c *Conn) rebuildSession(oldSession *Session, reason error) *Session {
