@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	im_parser "github.com/albert/ws_client/e2ewebsocket/im_parser"
+	"github.com/gorilla/websocket"
 )
 
 type Conn struct {
@@ -28,12 +28,11 @@ type Conn struct {
 	closed   bool       // 标记 Conn 是否已被 Close
 }
 
-func NewSecureConn(hostId string, config *Config, imParser im_parser.IMParser) (*Conn, error) {
+func NewSecureConn(config *Config, imParser im_parser.IMParser) (*Conn, error) {
 	if imParser == nil {
 		return nil, errors.New("imParser is nil")
 	}
 	c := &Conn{
-		hostId:   hostId,
 		config:   config,
 		msgChan:  make(chan readMsgItem, 128),
 		imParser: imParser,
@@ -54,10 +53,19 @@ type readMsgItem struct {
 }
 
 func (c *Conn) readLoop() {
+
+	// 现在都是通过 closed 字段判断上层的大连接 Conn 是否被 Close 了，
+	// Conn 被 Close 了就需要退出 readLoop 了
+	// 现在的大 Conn 的生命周期和 readLoop 是一致的
+	// 因为一个大 Conn 只会有一个 readLoop
+	// 只有大 Conn Close，readLoop 才会退出，session 清理逻辑放在了大 Conn Close 的时候【所以msgChan何时清理？】
+	// 底层的 conn 不管是因为切换还是网络问题关闭都不会让 readLoop 退出，
+	//
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("readLoop panic: %v", r)
 		}
+		close(c.msgChan)
 		log.Println("readLoop exited")
 	}()
 
@@ -79,12 +87,16 @@ func (c *Conn) readLoop() {
 
 		// 用这个 conn 持续读
 		for {
-			if err := c.readRecord(); err != nil {
+			if err := c.readRecord(conn); err != nil {
 				c.connMu.Lock()
+				// 1. Conn Close 了的真断线
 				if c.closed {
 					c.connMu.Unlock()
 					return
 				}
+
+				// 这里即使新的conn还没生成并设置过来，c.conn也先被设置成nil了，也是新的不会等于旧的conn快照
+				// 所以Dial的时候无论如何走的都是重连 replace 逻辑，不会走真断线逻辑
 				replaced := (c.conn != conn)
 				if !replaced {
 					// 真断线：置 nil，等待 Dial 重连
@@ -102,10 +114,25 @@ func (c *Conn) readLoop() {
 	}
 }
 
-func (c *Conn) readRecord() error {
-	msgType, msg, err := c.conn.ReadMessage()
+func (c *Conn) readRecord(conn *websocket.Conn) error {
+	msgType, msg, err := conn.ReadMessage()
 	if err != nil {
 		log.Printf("readLoop ReadMessage error: %v", err)
+		// 很核心的改动，走到这里一般是因为上层主动调用了Dial，关闭了旧的底层ws连接，也就是c.conn关了，
+		// 这个 err 没有通过 msgChan 推给上层，而是直接返回了
+
+		// 【以前这里也返回err来告知readRecord出现的问题是底层连接问题，然后走readRecord循环终止+关闭清理流程
+		// 非底层连接问题，也就是连接上的某个会话层面的问题，都是terminateSession + return nil，
+		// 不会让整个readRecord循环终止】
+
+		// 这里底层c.conn断线有两种情况：
+		// 一种是网络崩了真断线或者Conn Close了的真断线；
+		// 一种是上层主动Dial了，关闭了旧的底层ws连接，为了替换c.conn而出现的断线；
+
+		// 所以这里的err只是return给readLoop里的逻辑去判断处理，
+		// 一种情况：如果是真断线，readLoop会把err推给上层；（像以前一样）上层发现底层conn真断线了会有对应的处理方式，比如重连，我们不需要管
+		// 另一种情况：如果是替换 c.conn 而出现的断线，这个是伪断线，不是真断线，是为了换连接而一定会产生的一个err
+		// 所以readLoop会把err吞掉，不推给上层，对于上层而言底层的conn切换是无感的
 		return err
 	}
 
@@ -126,6 +153,8 @@ func (c *Conn) readRecord() error {
 	msgData, err := c.imParser.BytesToMsgDataReadBound(msg[1:])
 	if err != nil {
 		log.Printf("readLoop MsgDataFromServerReadBound error: %v", err)
+		// ======================================= 这里怎么办，肯定不能return nil 底层conn的问题才可以return err
+		// 但这里也不是session的问题
 		return err
 	}
 	senderId := msgData.GetSendID()
@@ -204,6 +233,8 @@ func (c *Conn) readRecord() error {
 		msgDataBytes, err := c.imParser.MsgDataToBytesReadBound(msgData)
 		if err != nil {
 			log.Printf("readLoop MsgDataToServerReadBound error: %v", err)
+			// 这里同上====================================要考虑一下怎么处理，到这里已经又session的概念了
+			// 可以走 terminateSession 逻辑了
 			return err
 		}
 		c.msgChan <- readMsgItem{sessionId: sessionId, remoteId: senderId, msgType: msgType, msg: msgDataBytes, err: nil}
@@ -466,9 +497,17 @@ func (c *Conn) writeRecordLocked(typ recordType, msgData im_parser.MsgData, sess
 	}
 
 	outBuf = append(outBuf, msgDataBytes...)
+
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
+		return errNotConnected
+	}
+
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	err = c.conn.WriteMessage(websocket.BinaryMessage, outBuf)
+	err = conn.WriteMessage(websocket.BinaryMessage, outBuf)
 	if err != nil {
 		return err
 	}
@@ -599,6 +638,33 @@ func (c *Conn) Dial(urlStr string, requestHeader http.Header) (*http.Response, e
 	return httpResp, nil
 }
 
+func (c *Conn) DialAndSetUserId(urlStr string, hostId string, requestHeader http.Header) (*http.Response, error) {
+	// Dial 的时候用户已完成注册，此时 UserId 不为 nil，设置 hostId 比较合理
+	c.hostId = hostId
+
+	c.connMu.Lock()
+	// 关闭旧的底层连接（如果存在），使阻塞的 ReadMessage 返回错误
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+	c.connMu.Unlock()
+
+	// 建立新连接
+	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
+	if err != nil {
+		return httpResp, err
+	}
+
+	// 设置新连接并唤醒 readLoop
+	c.connMu.Lock()
+	c.conn = conn
+	c.connCond.Signal()
+	c.connMu.Unlock()
+
+	return httpResp, nil
+}
+
 func (c *Conn) IsNil() bool {
 	if c.conn != nil {
 		return false
@@ -645,14 +711,13 @@ func (c *Conn) terminateSession(session *Session, reason error) error {
 // 不发送 alter 消息版的 terminateSession
 // 本地出错误调用 terminateSession，接收到对方 alter 消息调用 closeSessionLocally
 func (c *Conn) closeSessionLocally(session *Session, reason error) {
-    if session == nil {
-        return
-    }
-    session.Close()
-    c.sessions.Delete(session.id)
-    log.Printf("Session %s closed locally: %v", session.id, reason)
+	if session == nil {
+		return
+	}
+	session.Close()
+	c.sessions.Delete(session.id)
+	log.Printf("Session %s closed locally: %v", session.id, reason)
 }
-
 
 // 重建session，自愈逻辑
 // func (c *Conn) rebuildSession(oldSession *Session, reason error) *Session {
