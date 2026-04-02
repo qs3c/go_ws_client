@@ -69,13 +69,13 @@ func (c *Conn) readLoop() {
 		log.Println("readLoop exited")
 	}()
 
+	var lastConn *websocket.Conn
+
 	for {
-		// 等待 conn 就绪（首次连接或重连后）
+		// 等待 conn 就绪（首次连接，或重连后新的连接）
+		// 如果 c.conn 还是上一轮处理的死连接，或者 c.conn 处于被上层 Close 掉的空置状态，继续休眠
 		c.connMu.Lock()
-		for c.conn == nil && !c.closed {
-			// Wait() 会把当前 goroutine 放进等待队列然后让出调度
-			// 等 Signal() 通知了才唤醒
-			// 不会一直 for 循环，Wait()就是配合 for 循环使用的
+		for (c.conn == nil || c.conn == lastConn) && !c.closed {
 			c.connCond.Wait()
 		}
 		if c.closed {
@@ -83,31 +83,27 @@ func (c *Conn) readLoop() {
 			return
 		}
 		conn := c.conn // 快照当前连接
+		lastConn = conn // 记录下来，作为下一次外层判定是否休眠的依据
 		c.connMu.Unlock()
 
 		// 用这个 conn 持续读
 		for {
 			if err := c.readRecord(conn); err != nil {
 				c.connMu.Lock()
-				// 1. Conn Close 了的真断线
+				// Conn ShutDonw 才退出
 				if c.closed {
 					c.connMu.Unlock()
 					return
 				}
 
-				// 这里即使新的conn还没生成并设置过来，c.conn也先被设置成nil了，也是新的不会等于旧的conn快照
-				// 所以Dial的时候无论如何走的都是重连 replace 逻辑，不会走真断线逻辑
+				// 所以Dial的时候无论如何走的都是重连【主动close底层连接】 replace 逻辑，不会走真断线逻辑
 				replaced := (c.conn != conn)
 				if !replaced {
-					// 真断线：置 nil，等待 Dial 重连
-					c.conn = nil
-				}
-				c.connMu.Unlock()
-				if !replaced {
-					// 真断线错误推给上层
+					// 底层真断线错误推给上层
 					c.msgChan <- readMsgItem{err: err}
 				}
-				// 无论是重连还是真断线，都回到外层等新 conn
+				c.connMu.Unlock()
+				// 无论是重连还是真断线，都回到外层统一交由 `for (c.conn == nil || c.conn == lastConn)` 接管挂起判断
 				break
 			}
 		}
@@ -549,7 +545,22 @@ func (c *Conn) writeRecordLocked(typ recordType, msgData im_parser.MsgData, sess
 // 	return nil
 // }
 
+
 func (c *Conn) Close() error {
+	// 没有 Close Conn，只是 close 底层 ws
+	c.connMu.Lock()
+	var err error
+	if c.conn != nil {
+		err = c.conn.Close()
+		c.conn = nil
+	}
+	c.connMu.Unlock()
+
+	return err
+}
+
+func (c *Conn) ShutDown() error {
+	// 真 Close Conn
 	c.connMu.Lock()
 	c.closed = true
 	var err error
@@ -615,14 +626,6 @@ func (c *Conn) LocalAddr() string {
 }
 
 func (c *Conn) Dial(urlStr string, requestHeader http.Header) (*http.Response, error) {
-	c.connMu.Lock()
-	// 关闭旧的底层连接（如果存在），使阻塞的 ReadMessage 返回错误
-	if c.conn != nil {
-		c.conn.Close()
-		c.conn = nil
-	}
-	c.connMu.Unlock()
-
 	// 建立新连接
 	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
 	if err != nil {
@@ -641,14 +644,6 @@ func (c *Conn) Dial(urlStr string, requestHeader http.Header) (*http.Response, e
 func (c *Conn) DialAndSetUserId(urlStr string, hostId string, requestHeader http.Header) (*http.Response, error) {
 	// Dial 的时候用户已完成注册，此时 UserId 不为 nil，设置 hostId 比较合理
 	c.hostId = hostId
-
-	c.connMu.Lock()
-	// 关闭旧的底层连接（如果存在），使阻塞的 ReadMessage 返回错误
-	if c.conn != nil {
-		c.conn.Close()
-		c.conn = nil
-	}
-	c.connMu.Unlock()
 
 	// 建立新连接
 	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
@@ -748,4 +743,5 @@ func (c *Conn) closeSessionLocally(session *Session, reason error) {
 
 //		return newSession
 //	}
+
 type PingPongHandler func(string) error
