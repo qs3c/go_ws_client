@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/openimsdk/protocol/sdkws"
-	imparser "github.com/albert/ws_client/e2ewebsocket/im_parser"
+	imparser "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser"
 )
 
 var offlinePushInfo = &sdkws.OfflinePushInfo{

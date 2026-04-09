@@ -8,9 +8,9 @@ import (
 	"errors"
 	"fmt"
 
-	ccrypto "github.com/albert/ws_client/crypto"
-	"github.com/albert/ws_client/crypto/sm2tongsuo"
-	"github.com/albert/ws_client/crypto/sm3tongsuo"
+	ccrypto "github.com/qs3c/e2e-secure-ws/crypto"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm2tongsuo"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm3tongsuo"
 )
 
 // 分离签名方案中的签名算法和哈希算法

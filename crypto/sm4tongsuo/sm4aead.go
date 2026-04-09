@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/albert/ws_client/crypto"
+	"github.com/qs3c/e2e-secure-ws/crypto"
 )
 
 // // 加密流程

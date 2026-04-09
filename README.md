@@ -1,4 +1,4 @@
-# go_ws_client
+# e2e-secure-ws
 
 > 基于 Go 语言实现的 WebSocket 客户端库，面向 [OpenIM](https://github.com/openimsdk/open-im-server) 等各类即时通讯平台，内置端到端（E2E）加密握手协议，支持国密算法（SM2/SM3/SM4）。
 
@@ -21,7 +21,7 @@
 ## 📦 项目结构
 
 ```
-go_ws_client/
+e2e-secure-ws/
 ├── ws_client.go          # 普通 WebSocket 客户端主程序（build tag: client）
 ├── builder.go            # IM 消息构建器（MsgData → Req → 编码+压缩）
 ├── types.go              # 公共请求/响应结构体（Req / Resp / Message）
@@ -144,7 +144,7 @@ Gzip 解压 → Gob 解码 → Resp
 
 ```bash
 git clone <repo-url>
-cd go_ws_client
+cd e2e-secure-ws
 git submodule update --init --recursive
 ```
 

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	ccrypto "github.com/albert/ws_client/crypto"
-	"github.com/albert/ws_client/crypto/sm2tongsuo"
+	ccrypto "github.com/qs3c/e2e-secure-ws/crypto"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm2tongsuo"
 )
 
 // 测试从 PEM 文件分别加载私钥和公钥后，SM2签名验签是否正常

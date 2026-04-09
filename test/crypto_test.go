@@ -8,11 +8,11 @@ import (
 	"crypto/rand"
 	"encoding/hex" // Added for hex.EncodeToString
 
-	ccrypto "github.com/albert/ws_client/crypto"
-	"github.com/albert/ws_client/crypto/sm2keyexch"
-	"github.com/albert/ws_client/crypto/sm2tongsuo"
-	"github.com/albert/ws_client/crypto/sm3tongsuo" // Added as per instruction
-	"github.com/albert/ws_client/crypto/sm4tongsuo"
+	ccrypto "github.com/qs3c/e2e-secure-ws/crypto"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm2keyexch"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm2tongsuo"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm3tongsuo" // Added as per instruction
+	"github.com/qs3c/e2e-secure-ws/crypto/sm4tongsuo"
 )
 
 func TestCryptoTools_SM2_KeyExchange(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"io"
 
-	ccrypto "github.com/albert/ws_client/crypto"
-	"github.com/albert/ws_client/crypto/sm2keyexch"
+	ccrypto "github.com/qs3c/e2e-secure-ws/crypto"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm2keyexch"
 )
 
 var (

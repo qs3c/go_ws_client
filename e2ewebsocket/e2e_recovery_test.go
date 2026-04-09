@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/albert/ws_client/encoder"
-	openimmarshal "github.com/albert/ws_client/e2ewebsocket/im_parser/openim_marshal"
+	"github.com/qs3c/e2e-secure-ws/encoder"
+	openimmarshal "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser/openim_marshal"
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"

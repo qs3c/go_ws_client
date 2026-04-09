@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	ccrypto "github.com/albert/ws_client/crypto"
+	ccrypto "github.com/qs3c/e2e-secure-ws/crypto"
 )
 
 func TestKeyLoadingFromFile(t *testing.T) {

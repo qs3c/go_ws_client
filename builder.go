@@ -6,8 +6,8 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/albert/ws_client/compressor"
-	"github.com/albert/ws_client/encoder"
+	"github.com/qs3c/e2e-secure-ws/compressor"
+	"github.com/qs3c/e2e-secure-ws/encoder"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/openimsdk/protocol/sdkws"

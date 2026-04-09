@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/albert/ws_client/encoder"
+	"github.com/qs3c/e2e-secure-ws/encoder"
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
-	openimmarshal "github.com/albert/ws_client/e2ewebsocket/im_parser/openim_marshal"
+	openimmarshal "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser/openim_marshal"
 )
 
 // TestE2E_MultiPeer 测试 Alice 同时与 Bob 和 Catherine 进行 E2E 加密通信。
