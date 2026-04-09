@@ -12,9 +12,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/albert/ws_client/compressor"
-	confparser "github.com/albert/ws_client/configparser"
-	"github.com/albert/ws_client/encoder"
+	"github.com/qs3c/e2e-secure-ws/compressor"
+	confparser "github.com/qs3c/e2e-secure-ws/configparser"
+	"github.com/qs3c/e2e-secure-ws/encoder"
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"

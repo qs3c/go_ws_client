@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/albert/ws_client/encoder"
+	"github.com/qs3c/e2e-secure-ws/encoder"
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
-	openimmarshal "github.com/albert/ws_client/e2ewebsocket/im_parser/openim_marshal"
+	openimmarshal "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser/openim_marshal"
 )
 
 // TestE2E_MultiPeer 测试 Alice 同时与 Bob 和 Catherine 进行 E2E 加密通信。
@@ -42,7 +42,7 @@ func TestE2E_MultiPeer(t *testing.T) {
 	mockComp := &MockCompressor{}
 	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
 	newConn := func(wsURL, hostId string) *Conn {
-		conn, err := NewSecureConn(hostId, &Config{
+		conn, err := NewSecureConn(&Config{
 			KeyStorePath: keyStorePath,
 			Compressor:   mockComp,
 			Encoder:      encoder.NewGobEncoder(),
@@ -50,7 +50,7 @@ func TestE2E_MultiPeer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("[%s] NewSecureConn failed: %v", hostId, err)
 		}
-		_, err = conn.Dial(wsURL+"?uid="+hostId, nil)
+		_, err = conn.DialAndSetUserId(wsURL+"?uid="+hostId, hostId, nil)
 		if err != nil {
 			t.Fatalf("[%s] Dial(%s) failed: %v", hostId, wsURL, err)
 		}

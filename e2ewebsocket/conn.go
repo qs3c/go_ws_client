@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	im_parser "github.com/albert/ws_client/e2ewebsocket/im_parser"
+	im_parser "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser"
 	"github.com/gorilla/websocket"
 )
 
@@ -148,10 +148,9 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 	typ := recordType(msg[0])
 	msgData, err := c.imParser.BytesToMsgDataReadBound(msg[1:])
 	if err != nil {
+		// 消息解析失败，属于应用层问题，此时尚无 session，直接跳过这条坏消息，不影响 readLoop 继续运行
 		log.Printf("readLoop MsgDataFromServerReadBound error: %v", err)
-		// ======================================= 这里怎么办，肯定不能return nil 底层conn的问题才可以return err
-		// 但这里也不是session的问题
-		return err
+		return nil
 	}
 	senderId := msgData.GetSendID()
 	sessionId := getSessionID(c.hostId, senderId)
@@ -228,10 +227,10 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 		// 正常向上层传递应用数据记录
 		msgDataBytes, err := c.imParser.MsgDataToBytesReadBound(msgData)
 		if err != nil {
-			log.Printf("readLoop MsgDataToServerReadBound error: %v", err)
-			// 这里同上====================================要考虑一下怎么处理，到这里已经又session的概念了
-			// 可以走 terminateSession 逻辑了
-			return err
+			// 序列化失败是应用层/session 层问题，终止该 session 即可，不影响 readLoop 继续运行
+			log.Printf("readLoop MsgDataToBytesReadBound error: %v", err)
+			c.terminateSession(session, err)
+			return nil
 		}
 		c.msgChan <- readMsgItem{sessionId: sessionId, remoteId: senderId, msgType: msgType, msg: msgDataBytes, err: nil}
 

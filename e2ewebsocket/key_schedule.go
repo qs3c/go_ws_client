@@ -7,7 +7,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/albert/ws_client/crypto/ecdh_curve"
+	"github.com/qs3c/e2e-secure-ws/crypto/ecdh_curve"
 )
 
 // 这个文件目前是没有用处的！后续如果做非 sm2 的其他国际标准协商才用的上这个

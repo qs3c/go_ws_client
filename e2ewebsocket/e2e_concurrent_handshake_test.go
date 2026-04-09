@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/albert/ws_client/encoder"
+	"github.com/qs3c/e2e-secure-ws/encoder"
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
-	openimmarshal "github.com/albert/ws_client/e2ewebsocket/im_parser/openim_marshal"
+	openimmarshal "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser/openim_marshal"
 )
 
 // TestE2E_ConcurrentHandshake 测试双端几乎同时发送首条消息时触发的并发握手碰撞场景。
@@ -41,7 +41,7 @@ func TestE2E_ConcurrentHandshake(t *testing.T) {
 	mockComp := &MockCompressor{}
 	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
 	newConn := func(wsURL, hostId string) *Conn {
-		conn, err := NewSecureConn(hostId, &Config{
+		conn, err := NewSecureConn(&Config{
 			KeyStorePath: keyStorePath,
 			Compressor:   mockComp,
 			Encoder:      encoder.NewGobEncoder(),
@@ -49,7 +49,7 @@ func TestE2E_ConcurrentHandshake(t *testing.T) {
 		if err != nil {
 			t.Fatalf("[%s] NewSecureConn failed: %v", hostId, err)
 		}
-		_, err = conn.Dial(wsURL+"?uid="+hostId, nil)
+		_, err = conn.DialAndSetUserId(wsURL+"?uid="+hostId, hostId, nil)
 		if err != nil {
 			t.Fatalf("[%s] Dial failed: %v", hostId, err)
 		}

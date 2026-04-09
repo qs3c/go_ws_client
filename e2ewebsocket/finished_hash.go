@@ -4,7 +4,7 @@ import (
 	"crypto/sha1"
 	"hash"
 
-	"github.com/albert/ws_client/crypto/sm3tongsuo"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm3tongsuo"
 )
 
 const localFinishedLabel = "local finished"

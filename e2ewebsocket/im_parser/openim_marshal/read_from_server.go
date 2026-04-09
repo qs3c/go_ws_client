@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
-	imparser "github.com/albert/ws_client/e2ewebsocket/im_parser"
+	imparser "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser"
 )
 
 // ReadBound 是 Server=> 方向的，与 Resp 打交道

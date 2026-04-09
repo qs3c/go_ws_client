@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/albert/ws_client/encoder"
+	"github.com/qs3c/e2e-secure-ws/encoder"
 	"github.com/gorilla/websocket"
 	"github.com/openimsdk/protocol/sdkws"
 	"google.golang.org/protobuf/proto"
-	openimmarshal "github.com/albert/ws_client/e2ewebsocket/im_parser/openim_marshal"
+	openimmarshal "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser/openim_marshal"
 )
 
 // 两个人互相连续发送多条消息乒乓测试
@@ -35,7 +35,7 @@ func TestE2E_PingPong(t *testing.T) {
 	parser := openimmarshal.NewOpenIMParser(encoder.NewGobEncoder(), mockComp)
 
 	newConn := func(wsURL, hostId string) *Conn {
-		conn, err := NewSecureConn(hostId, &Config{
+		conn, err := NewSecureConn(&Config{
 			KeyStorePath: keyStorePath,
 			Compressor:   mockComp,
 			Encoder:      encoder.NewGobEncoder(),
@@ -43,7 +43,7 @@ func TestE2E_PingPong(t *testing.T) {
 		if err != nil {
 			t.Fatalf("[%s] NewSecureConn failed: %v", hostId, err)
 		}
-		_, err = conn.Dial(wsURL+"?uid="+hostId, nil)
+		_, err = conn.DialAndSetUserId(wsURL+"?uid="+hostId, hostId, nil)
 		if err != nil {
 			t.Fatalf("[%s] Dial failed: %v", hostId, err)
 		}

@@ -12,7 +12,7 @@ import (
 	"math/big"
 	"unsafe"
 
-	"github.com/albert/ws_client/crypto"
+	"github.com/qs3c/e2e-secure-ws/crypto"
 )
 
 // VerifyASN1 verifies ASN.1 encoded signature. Returns nil on success.

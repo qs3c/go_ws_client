@@ -1,4 +1,4 @@
-module github.com/albert/ws_client
+module github.com/qs3c/e2e-secure-ws
 
 go 1.24.6
 

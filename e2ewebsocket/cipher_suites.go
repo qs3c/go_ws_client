@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"hash"
 
-	"github.com/albert/ws_client/crypto/sm4tongsuo"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm4tongsuo"
 )
 
 // ciphersuite 的 flags 字段与对象

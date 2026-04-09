@@ -15,7 +15,7 @@ import (
 	"hash"
 	"runtime"
 	"unsafe"
-	// ccrypto "github.com/albert/ws_client/crypto"
+	// ccrypto "github.com/qs3c/e2e-secure-ws/crypto"
 )
 
 // 封闭式的你注册不进去

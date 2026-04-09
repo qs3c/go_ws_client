@@ -1,0 +1,10 @@
+﻿{
+  "folders": [
+    { "name": "main", "path": "D:/e2e-secure-ws" },
+    { "name": "codex", "path": "D:/e2e-secure-ws/.worktree/codex" },
+    { "name": "anti_gemini3pro", "path": "D:/e2e-secure-ws/.worktree/anti_gemini3pro" },
+    { "name": "claude", "path": "D:/e2e-secure-ws/.worktree/claude" },
+    { "name": "amagi", "path": "D:/e2e-secure-ws/.worktree/amagi" }
+  ],
+  "settings": {}
+}

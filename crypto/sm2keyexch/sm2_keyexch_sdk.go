@@ -16,7 +16,7 @@ import (
 	"errors"
 	"unsafe"
 
-	"github.com/albert/ws_client/crypto"
+	"github.com/qs3c/e2e-secure-ws/crypto"
 )
 
 type KAPCtx struct{ c C.SM2_KAP_CTX }

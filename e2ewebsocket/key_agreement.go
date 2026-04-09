@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 
-	ccrypto "github.com/albert/ws_client/crypto"
-	"github.com/albert/ws_client/crypto/ecdh_curve"
-	"github.com/albert/ws_client/crypto/sm2keyexch"
-	"github.com/albert/ws_client/crypto/sm2tongsuo"
-	"github.com/albert/ws_client/crypto/sm3tongsuo"
+	ccrypto "github.com/qs3c/e2e-secure-ws/crypto"
+	"github.com/qs3c/e2e-secure-ws/crypto/ecdh_curve"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm2keyexch"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm2tongsuo"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm3tongsuo"
 )
 
 var errKeyExchange = errors.New("invalid KeyExchange message")

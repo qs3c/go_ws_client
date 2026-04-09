@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/albert/ws_client/crypto/sm4tongsuo"
+	"github.com/qs3c/e2e-secure-ws/crypto/sm4tongsuo"
 	"github.com/gorilla/websocket"
 )
 
