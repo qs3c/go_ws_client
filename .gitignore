@@ -1,7 +1,10 @@
 # Tongsuo local build artifacts
 /third_party/tongsuo-build/
-/third_party/tongsuo-build*/
+/third_party/tongsuo-build-*/
 /third_party/tongsuo-install/
+/third_party/fake-bin/
+/third_party/tongsuo/Pod/
+/crypto/sm2keyexch/android/
 
 # Build artifacts
 *.o
