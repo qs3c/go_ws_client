@@ -5,11 +5,13 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	im_parser "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser"
 	"github.com/gorilla/websocket"
+	im_parser "github.com/qs3c/e2e-secure-ws/e2ewebsocket/im_parser"
 )
 
 type Conn struct {
@@ -22,10 +24,11 @@ type Conn struct {
 	imParser im_parser.IMParser
 	writeMu  sync.Mutex
 
-	// readLoop 等待/唤醒机制
-	connMu   sync.Mutex // 保护 conn 和 closed 字段
-	connCond *sync.Cond // readLoop 等待 conn 就绪的条件变量
-	closed   bool       // 标记 Conn 是否已被 Close
+	writeDeadlineNanos atomic.Int64
+
+	connMu   sync.Mutex
+	connCond *sync.Cond
+	closed   bool
 }
 
 func NewSecureConn(config *Config, imParser im_parser.IMParser) (*Conn, error) {
@@ -44,23 +47,13 @@ func NewSecureConn(config *Config, imParser im_parser.IMParser) (*Conn, error) {
 
 type readMsgItem struct {
 	sessionId SessionID
-	// ######## remoteId 可能没用
-	remoteId string
-	// 基础消息
-	msgType int
-	msg     []byte
-	err     error
+	remoteId  string
+	msgType   int
+	msg       []byte
+	err       error
 }
 
 func (c *Conn) readLoop() {
-
-	// 现在都是通过 closed 字段判断上层的大连接 Conn 是否被 Close 了，
-	// Conn 被 Close 了就需要退出 readLoop 了
-	// 现在的大 Conn 的生命周期和 readLoop 是一致的
-	// 因为一个大 Conn 只会有一个 readLoop
-	// 只有大 Conn Close，readLoop 才会退出，session 清理逻辑放在了大 Conn Close 的时候【所以msgChan何时清理？】
-	// 底层的 conn 不管是因为切换还是网络问题关闭都不会让 readLoop 退出，
-	//
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("readLoop panic: %v", r)
@@ -72,8 +65,6 @@ func (c *Conn) readLoop() {
 	var lastConn *websocket.Conn
 
 	for {
-		// 等待 conn 就绪（首次连接，或重连后新的连接）
-		// 如果 c.conn 还是上一轮处理的死连接，或者 c.conn 处于被上层 Close 掉的空置状态，继续休眠
 		c.connMu.Lock()
 		for (c.conn == nil || c.conn == lastConn) && !c.closed {
 			c.connCond.Wait()
@@ -82,28 +73,23 @@ func (c *Conn) readLoop() {
 			c.connMu.Unlock()
 			return
 		}
-		conn := c.conn // 快照当前连接
-		lastConn = conn // 记录下来，作为下一次外层判定是否休眠的依据
+		conn := c.conn
+		lastConn = conn
 		c.connMu.Unlock()
 
-		// 用这个 conn 持续读
 		for {
 			if err := c.readRecord(conn); err != nil {
 				c.connMu.Lock()
-				// Conn ShutDonw 才退出
 				if c.closed {
 					c.connMu.Unlock()
 					return
 				}
 
-				// 所以Dial的时候无论如何走的都是重连【主动close底层连接】 replace 逻辑，不会走真断线逻辑
-				replaced := (c.conn != conn)
+				replaced := c.conn != conn
 				if !replaced {
-					// 底层真断线错误推给上层
 					c.msgChan <- readMsgItem{err: err}
 				}
 				c.connMu.Unlock()
-				// 无论是重连还是真断线，都回到外层统一交由 `for (c.conn == nil || c.conn == lastConn)` 接管挂起判断
 				break
 			}
 		}
@@ -114,45 +100,32 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 	msgType, msg, err := conn.ReadMessage()
 	if err != nil {
 		log.Printf("readLoop ReadMessage error: %v", err)
-		// 很核心的改动，走到这里一般是因为上层主动调用了Dial，关闭了旧的底层ws连接，也就是c.conn关了，
-		// 这个 err 没有通过 msgChan 推给上层，而是直接返回了
-
-		// 【以前这里也返回err来告知readRecord出现的问题是底层连接问题，然后走readRecord循环终止+关闭清理流程
-		// 非底层连接问题，也就是连接上的某个会话层面的问题，都是terminateSession + return nil，
-		// 不会让整个readRecord循环终止】
-
-		// 这里底层c.conn断线有两种情况：
-		// 一种是网络崩了真断线或者Conn Close了的真断线；
-		// 一种是上层主动Dial了，关闭了旧的底层ws连接，为了替换c.conn而出现的断线；
-
-		// 所以这里的err只是return给readLoop里的逻辑去判断处理，
-		// 一种情况：如果是真断线，readLoop会把err推给上层；（像以前一样）上层发现底层conn真断线了会有对应的处理方式，比如重连，我们不需要管
-		// 另一种情况：如果是替换 c.conn 而出现的断线，这个是伪断线，不是真断线，是为了换连接而一定会产生的一个err
-		// 所以readLoop会把err吞掉，不推给上层，对于上层而言底层的conn切换是无感的
 		return err
 	}
 
-	// 如果不是二进制类型的，正常传递给上层
 	if msgType != websocket.BinaryMessage {
 		c.msgChan <- readMsgItem{msgType: msgType, msg: msg}
 		return nil
 	}
 
-	// 解析 msg 构造 sessionId 并获取到对应的 session
-	// 无需解析11字节头部来获取senderId,只解析1字节头部获取type
-	// 如果是应用层消息，再反序列化出MsgData获取senderId
-	if len(msg) < 1 {
-		log.Printf("readLoop received binary message with length < 1, cannot parse header")
-		return nil
-	}
-	typ := recordType(msg[0])
-	msgData, err := c.imParser.BytesToMsgDataReadBound(msg[1:])
+	msgData, err := c.imParser.BytesToMsgDataReadBound(msg)
 	if err != nil {
-		// 消息解析失败，属于应用层问题，此时尚无 session，直接跳过这条坏消息，不影响 readLoop 继续运行
+		if errors.Is(err, im_parser.ErrDropSecureWS) {
+			return nil
+		}
+		if errors.Is(err, im_parser.ErrBypassSecureWS) {
+			c.msgChan <- readMsgItem{msgType: msgType, msg: msg}
+			return nil
+		}
 		log.Printf("readLoop MsgDataFromServerReadBound error: %v", err)
 		return nil
 	}
+
 	senderId := msgData.GetSendID()
+	if senderId == "" {
+		log.Printf("readLoop secure message missing sender id")
+		return nil
+	}
 	sessionId := getSessionID(c.hostId, senderId)
 
 	actual, loaded := c.sessions.LoadOrStore(sessionId, NewSession(sessionId, senderId, c))
@@ -166,48 +139,38 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 	}
 
 	handshakeComplete := session.isHandshakeComplete.Load()
-
-	// 解密 MsgData 的 Content 字段
-	content := msgData.GetContent()
-	data, err := session.in.decrypt(content)
-	msgData.SetContent(data)
-
+	plaintext, err := session.in.decrypt(msgData.GetContent())
 	if err != nil {
 		log.Printf("readLoop decrypt error: %v", err)
-		// 这个是否合适，一次和 A 之间的解密失败，你和 A 似乎就永别了
-		// ====================【设置永久错误和触发session自愈之间有gap，是否应该立即触发自愈而不是设置错误呢？】
 		c.terminateSession(session, err)
-		// c.msgChan <- readMsgItem{err: err}
+		return nil
+	}
+	if len(plaintext) < 1 {
+		log.Printf("readLoop secure payload is empty")
+		c.terminateSession(session, errors.New("empty secure payload"))
 		return nil
 	}
 
+	typ := recordType(plaintext[0])
+	data := plaintext[1:]
+	msgData.SetContent(data)
+
 	switch typ {
 	default:
-		// 收到来自A的诡异消息，可能被攻击了，终止 session
 		log.Printf("readLoop unexpected message type: %d", typ)
 		c.terminateSession(session, errors.New("UnexpectedMessage"))
 		return nil
-	// 收到来自 A 的 session 销毁通知
 	case recordTypeAlert:
 		if string(data) != "Alert" {
-			log.Printf("收到不合法的Alert消息")
+			log.Printf("readLoop invalid alert message")
 			c.terminateSession(session, errors.New("AlertMessageLenError"))
 			return nil
 		}
 		log.Printf("readLoop received alert from %s", senderId)
-		// 收到 Alert，直接销毁本地 Session
-		// c.terminateSession(session, errors.New("received alert"))
 		c.closeSessionLocally(session, errors.New("received alert"))
 		return nil
-	// 收到来自 A 的应用数据记录
 	case recordTypeApplicationData:
-		// #############handshake 是异步的 这里的话很有可能没完成啊！
-		// 特殊情况：握手太慢，第二条来的有太快了，来了还没握好，怎么办，直接永久错误？
-
 		if !handshakeComplete && loaded {
-			// 特殊情况：握手其实已经完成了（Handshake函数返回了），但是状态位 isHandshakeComplete 还没来得及设置
-			// 此时应用数据就已经到了。我们需要给一点时间让握手协程更新状态。
-			// 这是一个非常短的竞态窗口。
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 
@@ -220,175 +183,44 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 					c.terminateSession(session, errors.New("alertUnexpectedMessage"))
 					return nil
 				case <-session.done:
-					return nil // Session closed
+					return nil
 				}
 			}
 		}
-		// 正常向上层传递应用数据记录
+
 		msgDataBytes, err := c.imParser.MsgDataToBytesReadBound(msgData)
 		if err != nil {
-			// 序列化失败是应用层/session 层问题，终止该 session 即可，不影响 readLoop 继续运行
 			log.Printf("readLoop MsgDataToBytesReadBound error: %v", err)
 			c.terminateSession(session, err)
 			return nil
 		}
-		c.msgChan <- readMsgItem{sessionId: sessionId, remoteId: senderId, msgType: msgType, msg: msgDataBytes, err: nil}
-
-	// 收到来自 A 的握手记录
+		c.msgChan <- readMsgItem{
+			sessionId: sessionId,
+			remoteId:  senderId,
+			msgType:   msgType,
+			msg:       msgDataBytes,
+		}
 	case recordTypeHandshake:
-
-		// 发送到 session 专属通道
 		select {
 		case session.handshakeChan <- sessionMsg{typ: recordTypeHandshake, data: data}:
 		default:
-			// default 分支防止阻塞 readLoop 而存在，虽然理论上握手过程应该在消费不会阻塞
-			// 正常来说不可能阻塞，如果握手消息通道都塞满了说明 session 一定是出问题了
 			log.Printf("readLoop handshake channel blocked for session %s", session.id)
 			c.terminateSession(session, errors.New("handshake channel blocked"))
 			return nil
 		}
-
 	case recordTypeChangeCipherSpec:
-		// CCS 消息检查
 		if len(data) != 3 || string(data) != "CCS" {
 			c.terminateSession(session, errors.New("alertDecodeError"))
 			return nil
 		}
-
-		// 变更 in 的密码套件
 		if err := session.in.changeCipherSpec(); err != nil {
 			log.Printf("readLoop changeCipherSpec error: %v", err)
-			c.terminateSession(session, errors.New("change cipher failed!"))
+			c.terminateSession(session, errors.New("change cipher failed"))
 			return nil
 		}
 	}
 	return nil
 }
-
-// func (c *Conn) readRecord() error {
-// 	msgType, msg, err := c.conn.ReadMessage()
-// 	if err != nil {
-// 		log.Printf("readLoop ReadMessage error: %v", err)
-// 		c.msgChan <- readMsgItem{err: err}
-// 		return err
-// 	}
-
-// 	// 如果不是二进制类型的，正常传递给上层
-// 	if msgType != websocket.BinaryMessage {
-// 		c.msgChan <- readMsgItem{msgType: msgType, msg: msg}
-// 		return nil
-// 	}
-
-// 	// 解析 msg 构造 sessionId 并获取到对应的 session
-// 	// 改造8：无需解析11字节头部来获取senderId,只解析1字节头部获取type
-// 	// 如果是应用层消息，再反序列化出MsgData获取senderId
-// 	if len(msg) < 1 {
-// 		log.Printf("readLoop received binary message with length < 1, cannot parse header")
-// 		return nil
-// 	}
-// 	typ := recordType(msg[0])
-// 	senderId := string(bytes.TrimRight(msg[1:11], "\x00"))
-// 	sessionId := getSessionID(c.hostId, senderId)
-
-// 	actual, loaded := c.sessions.LoadOrStore(sessionId, NewSession(sessionId, senderId, c))
-// 	session := actual.(*Session)
-// 	if !loaded {
-// 		go func(s *Session) {
-// 			if err := s.Handshake(); err != nil {
-// 				log.Printf("Passive handshake failed for session %s: %v", s.id, err)
-// 			}
-// 		}(session)
-// 	}
-
-// 	handshakeComplete := session.isHandshakeComplete.Load()
-
-// 	// 解密
-// 	// 改造9：解密 MsgData 的 Content 字段
-// 	data, err := session.in.decrypt(msg[11:])
-// 	if err != nil {
-// 		log.Printf("readLoop decrypt error: %v", err)
-// 		// 这个是否合适，一次和 A 之间的解密失败，你和 A 似乎就永别了
-// 		// ====================【设置永久错误和触发session自愈之间有gap，是否应该立即触发自愈而不是设置错误呢？】
-// 		c.terminateSession(session, err)
-// 		// c.msgChan <- readMsgItem{err: err}
-// 		return nil
-// 	}
-
-// 	switch typ {
-// 	default:
-// 		// 收到来自A的诡异消息，可能被攻击了，终止 session
-// 		log.Printf("readLoop unexpected message type: %d", typ)
-// 		c.terminateSession(session, errors.New("UnexpectedMessage"))
-// 		return nil
-// 	// 收到来自 A 的 session 销毁通知
-// 	case recordTypeAlert:
-// 		if len(data) < 2 {
-// 			log.Printf("收到不合法的Alert消息，长度小于2")
-// 			c.terminateSession(session, errors.New("AlertMessageLenError"))
-// 			return nil
-// 		}
-// 		log.Printf("readLoop received alert: level=%d, desc=%d from %s", data[0], data[1], senderId)
-// 		// 收到 Alert，直接销毁本地 Session
-// 		c.terminateSession(session, errors.New("received alert"))
-// 		return nil
-// 	// 收到来自 A 的应用数据记录
-// 	case recordTypeApplicationData:
-// 		// #############handshake 是异步的 这里的话很有可能没完成啊！
-// 		// 特殊情况：握手太慢，第二条来的有太快了，来了还没握好，怎么办，直接永久错误？
-
-// 		if !handshakeComplete && loaded {
-// 			// 特殊情况：握手其实已经完成了（Handshake函数返回了），但是状态位 isHandshakeComplete 还没来得及设置
-// 			// 此时应用数据就已经到了。我们需要给一点时间让握手协程更新状态。
-// 			// 这是一个非常短的竞态窗口。
-// 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-// 			defer cancel()
-
-// 			if !session.isHandshakeComplete.Load() {
-// 				log.Printf("readLoop waiting for handshake completion for session %s...", sessionId)
-// 				select {
-// 				case <-session.handshakeComplete:
-// 				case <-ctx.Done():
-// 					log.Printf("readLoop handshake wait timeout for session %s", sessionId)
-// 					c.terminateSession(session, errors.New("alertUnexpectedMessage"))
-// 					return nil
-// 				case <-session.done:
-// 					return nil // Session closed
-// 				}
-// 			}
-// 		}
-// 		// 正常向上层传递应用数据记录
-// 		c.msgChan <- readMsgItem{sessionId: sessionId, remoteId: senderId, msgType: msgType, msg: data, err: nil}
-
-// 	// 收到来自 A 的握手记录
-// 	case recordTypeHandshake:
-
-// 		// 发送到 session 专属通道
-// 		select {
-// 		case session.handshakeChan <- sessionMsg{typ: recordTypeHandshake, data: data}:
-// 		default:
-// 			// default 分支防止阻塞 readLoop 而存在，虽然理论上握手过程应该在消费不会阻塞
-// 			// 正常来说不可能阻塞，如果握手消息通道都塞满了说明 session 一定是出问题了
-// 			log.Printf("readLoop handshake channel blocked for session %s", session.id)
-// 			c.terminateSession(session, errors.New("handshake channel blocked"))
-// 			return nil
-// 		}
-
-// 	case recordTypeChangeCipherSpec:
-// 		// CCS 消息检查
-// 		if len(data) != 1 || data[0] != 1 {
-// 			c.terminateSession(session, errors.New("alertDecodeError"))
-// 			return nil
-// 		}
-
-// 		// 变更 in 的密码套件
-// 		if err := session.in.changeCipherSpec(); err != nil {
-// 			log.Printf("readLoop changeCipherSpec error: %v", err)
-// 			c.terminateSession(session, errors.New("change cipher failed!"))
-// 			return nil
-// 		}
-// 	}
-// 	return nil
-// }
 
 func (c *Conn) ReadMessage() (int, []byte, error) {
 	item, ok := <-c.msgChan
@@ -399,71 +231,55 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 }
 
 func (c *Conn) WriteMessage(messageType int, message []byte) error {
+	if messageType != websocket.BinaryMessage {
+		return c.writeRawMessage(messageType, message)
+	}
 
-	// 似乎这里必须要写一段拆包逻辑来获取 receiveId 或者说 remoteId
-	// 和服务端的拆包逻辑相同，和模拟客户端的打包逻辑相反
-	var remoteId string
-	var err error
-	// if c.parseReceivedMsg == nil {
-	// 	// 改动1 ：这里就直接拿到 MsgData
-	// 	remoteId, err = c.parseReceivedMsgOPENIM(message)
-	// 	if err != nil {
-	// 		return err
-	// 	}
-	// } else {
-	// 	// 改动2 ：这里也直接拿到 MsgData
-	// 	remoteId, err = c.parseReceivedMsg(message)
-	// 	if err != nil {
-	// 		return err
-	// 	}
-	// }
 	msgData, err := c.imParser.BytesToMsgDataWriteBound(message)
 	if err != nil {
+		if errors.Is(err, im_parser.ErrBypassSecureWS) {
+			return c.writeRawMessage(messageType, message)
+		}
 		return err
 	}
-	remoteId = msgData.GetRecvID()
 
-	// 改动3 ： remoteId 通过 MsgData 拿到
+	remoteId := msgData.GetRecvID()
+	if remoteId == "" {
+		return c.writeRawMessage(messageType, message)
+	}
+
 	sessionId := getSessionID(c.hostId, remoteId)
 
 	var session *Session
 	if val, ok := c.sessions.Load(sessionId); ok {
 		session = val.(*Session)
 	}
-
-	// ##################惰性重建：如果 session 存在但已损坏，销毁并重建，这个不是很惰性其实
-	// if session != nil && session.Err() != nil {
-	// 	log.Printf("Session %s is broken (err: %v), discarding and creating new one", sessionId, session.Err())
-	// 	c.terminateSession(session, session.Err())
-	// 	session = nil
-	// }
-
 	if session == nil {
-		// 初始化session
 		session = NewSession(sessionId, remoteId, c)
 		actual, _ := c.sessions.LoadOrStore(sessionId, session)
 		session = actual.(*Session)
 	}
 
-	// 无条件调用 Handshake() 确保握手完成。以前是 session 为 nil 的时候才调用。
-	// Handshake() 内部有 sync.Mutex 保护并做了 isHandshakeComplete 检查：
-	// 1. 若已经完成，会由快路径瞬间返回 nil。
-	// 2. 若当前协程是该会话发起者，会执行并完成握手。
-	// 3. 若正在被后台的被动握手协程（由 readLoop 触发）处理中，则会优雅地阻塞等待其完成。
-	// 这样绝对避免了并发握手时的业务消息丢包。
 	if err := session.Handshake(); err != nil {
 		c.terminateSession(session, err)
 		return err
 	}
 
-	// 改动4：这里不再传入message，而是传入MsgData
 	err = c.writeRecordLocked(recordTypeApplicationData, msgData, session)
 	if err != nil {
-		// 这里要么是加密错（与session有关）要么是ws错（与session无关）
-		// 加密错需要 terminateSession 在内部处理了
 		return c.Close()
 	}
 	return nil
+}
+
+func (c *Conn) writeRawMessage(messageType int, message []byte) error {
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
+		return errNotConnected
+	}
+	return c.writeWebSocketMessage(conn, messageType, message)
 }
 
 func (c *Conn) writeRecordLocked(typ recordType, msgData im_parser.MsgData, session *Session) error {
@@ -471,27 +287,26 @@ func (c *Conn) writeRecordLocked(typ recordType, msgData im_parser.MsgData, sess
 		return errors.New("nil msgData")
 	}
 
-	// 只保留1字节的类型即可
-	outBuf := make([]byte, 1)
-	outBuf[0] = byte(typ)
+	securePayload := make([]byte, 1+len(msgData.GetContent()))
+	securePayload[0] = byte(typ)
+	copy(securePayload[1:], msgData.GetContent())
 
-	// 加密
-	// 只加密 MsgData 的 Content 字段
-	encContent, err := session.out.encrypt(nil, msgData.GetContent(), c.config.rand())
+	encContent, err := session.out.encrypt(nil, securePayload, c.config.rand())
 	if err != nil {
 		c.terminateSession(session, err)
 		return nil
 	}
 	msgData.SetContent(encContent)
 
-	// 改造7：重新序列化 MsgData 成 outBuf
-	// 发送
+	ex := msgData.GetEx()
+	if !strings.HasPrefix(ex, im_parser.SecureWSMarker) {
+		msgData.SetEx(im_parser.SecureWSMarker + ex)
+	}
+
 	msgDataBytes, err := c.imParser.MsgDataToBytesWriteBound(msgData)
 	if err != nil {
 		return err
 	}
-
-	outBuf = append(outBuf, msgDataBytes...)
 
 	c.connMu.Lock()
 	conn := c.conn
@@ -499,54 +314,30 @@ func (c *Conn) writeRecordLocked(typ recordType, msgData im_parser.MsgData, sess
 	if conn == nil {
 		return errNotConnected
 	}
-
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	err = conn.WriteMessage(websocket.BinaryMessage, outBuf)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.writeWebSocketMessage(conn, websocket.BinaryMessage, msgDataBytes)
 }
 
-// func (c *Conn) writeRecordLocked(typ recordType, data []byte, session *Session) error {
-// 	if len(data) == 0 {
-// 		return errors.New("zero length write")
-// 	}
+func (c *Conn) writeWebSocketMessage(conn *websocket.Conn, messageType int, message []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
-// 	// ################## 这里还蛮 openim 的
-// 	// 构造头部：[type(1)][senderId(10)]
+	if err := c.refreshWriteDeadline(conn); err != nil {
+		return err
+	}
+	return conn.WriteMessage(messageType, message)
+}
 
-// 	// 改动5：由于已经传入MsgData，知道发送和接收id，所以这里无需再构造11字节的头部，只保留1字节的类型即可
-// 	outBuf := make([]byte, 11)
-// 	outBuf[0] = byte(typ)
-// 	copy(outBuf[1:11], c.hostId)
-
-// 	// 加密
-// 	var err error
-// 	// 改造6： 只加密 MsgData 的 Content 字段
-// 	outBuf, err = session.out.encrypt(outBuf, data, c.config.rand())
-// 	if err != nil {
-// 		c.terminateSession(session, err)
-// 		return nil
-// 	}
-
-// 	// 改造7：重新序列化 MsgData 成 outBuf
-// 	// 发送
-// 	c.writeMu.Lock()
-// 	defer c.writeMu.Unlock()
-// 	err = c.conn.WriteMessage(websocket.BinaryMessage, outBuf)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	return nil
-// }
-
+func (c *Conn) refreshWriteDeadline(conn *websocket.Conn) error {
+	if conn == nil {
+		return errNotConnected
+	}
+	if ns := c.writeDeadlineNanos.Load(); ns > 0 {
+		return conn.SetWriteDeadline(time.Now().Add(time.Duration(ns)))
+	}
+	return conn.SetWriteDeadline(time.Time{})
+}
 
 func (c *Conn) Close() error {
-	// 没有 Close Conn，只是 close 底层 ws
 	c.connMu.Lock()
 	var err error
 	if c.conn != nil {
@@ -554,12 +345,10 @@ func (c *Conn) Close() error {
 		c.conn = nil
 	}
 	c.connMu.Unlock()
-
 	return err
 }
 
 func (c *Conn) ShutDown() error {
-	// 真 Close Conn
 	c.connMu.Lock()
 	c.closed = true
 	var err error
@@ -567,10 +356,9 @@ func (c *Conn) ShutDown() error {
 		err = c.conn.Close()
 		c.conn = nil
 	}
-	c.connCond.Signal() // 唤醒可能在等待的 readLoop，让它检查 closed 后退出
+	c.connCond.Signal()
 	c.connMu.Unlock()
 
-	// 关闭所有 sessions
 	c.sessions.Range(func(key, value any) bool {
 		session := value.(*Session)
 		session.Close()
@@ -590,10 +378,20 @@ func (c *Conn) SetReadDeadline(timeout time.Duration) error {
 }
 
 func (c *Conn) SetWriteDeadline(timeout time.Duration) error {
+	if timeout > 0 {
+		c.writeDeadlineNanos.Store(timeout.Nanoseconds())
+	} else {
+		c.writeDeadlineNanos.Store(0)
+	}
 	if c.conn == nil {
 		return errNotConnected
 	}
-	return c.conn.SetWriteDeadline(time.Now().Add(timeout))
+	if timeout <= 0 {
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
+		return c.conn.SetWriteDeadline(time.Time{})
+	}
+	return nil
 }
 
 func (c *Conn) SetReadLimit(limit int64) {
@@ -625,13 +423,11 @@ func (c *Conn) LocalAddr() string {
 }
 
 func (c *Conn) Dial(urlStr string, requestHeader http.Header) (*http.Response, error) {
-	// 建立新连接
 	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
 	if err != nil {
 		return httpResp, err
 	}
 
-	// 设置新连接并唤醒 readLoop
 	c.connMu.Lock()
 	c.conn = conn
 	c.connCond.Signal()
@@ -641,16 +437,13 @@ func (c *Conn) Dial(urlStr string, requestHeader http.Header) (*http.Response, e
 }
 
 func (c *Conn) DialAndSetUserId(urlStr string, hostId string, requestHeader http.Header) (*http.Response, error) {
-	// Dial 的时候用户已完成注册，此时 UserId 不为 nil，设置 hostId 比较合理
 	c.hostId = hostId
 
-	// 建立新连接
 	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
 	if err != nil {
 		return httpResp, err
 	}
 
-	// 设置新连接并唤醒 readLoop
 	c.connMu.Lock()
 	c.conn = conn
 	c.connCond.Signal()
@@ -660,10 +453,7 @@ func (c *Conn) DialAndSetUserId(urlStr string, hostId string, requestHeader http
 }
 
 func (c *Conn) IsNil() bool {
-	if c.conn != nil {
-		return false
-	}
-	return true
+	return c.conn == nil
 }
 
 func getSessionID(A, B string) SessionID {
@@ -673,37 +463,21 @@ func getSessionID(A, B string) SessionID {
 	return SessionID(B + "_" + A)
 }
 
-// 终止session
 func (c *Conn) terminateSession(session *Session, reason error) error {
 	if session == nil {
 		return reason
 	}
 
-	// 0. Try to notify peer (Best Effort)
-	// AlertLevel: 2 (Fatal), AlertDescription: 80 (Internal Error)
-	// 即使发送失败也不影响后续重建
-	// 注意防止递归：writeRecordLocked 内部如果出错不要再调 terminateSession
-	// 所以这里如果 session 已经坏了，writeRecordLocked 可能会失败并返回错误，
-	// 但是 terminateSession 只管 close，不管 writeRecordLocked 的死活
-	// 实际上 writeRecordLocked 需要 session，如果 session 被 close 了，encryption 可能会失败
-	// 但此时还没 close，所以尝试发送
-
-	// 构造 Alter MsgData
 	msgData := c.imParser.ConstructMsgData(c.hostId, session.remoteId, []byte("Alert"))
 	_ = c.writeRecordLocked(recordTypeAlert, msgData, session)
 
-	// 2. 清理资源 (Close channels, wake up blocked goroutines)
-	session.Close() // SetError calls Close
-
-	// 3. 从映射表移除 (Remove from map)
+	session.Close()
 	c.sessions.Delete(session.id)
 
 	log.Printf("Session %s terminated: %v", session.id, reason)
 	return reason
 }
 
-// 不发送 alter 消息版的 terminateSession
-// 本地出错误调用 terminateSession，接收到对方 alter 消息调用 closeSessionLocally
 func (c *Conn) closeSessionLocally(session *Session, reason error) {
 	if session == nil {
 		return
@@ -712,35 +486,5 @@ func (c *Conn) closeSessionLocally(session *Session, reason error) {
 	c.sessions.Delete(session.id)
 	log.Printf("Session %s closed locally: %v", session.id, reason)
 }
-
-// 重建session，自愈逻辑
-// func (c *Conn) rebuildSession(oldSession *Session, reason error) *Session {
-// 	log.Printf("Session %s broken (%v), rebuilding...", oldSession.id, reason)
-
-// 	// 0. Try to notify peer (Best Effort)
-// 	// AlertLevel: 2 (Fatal), AlertDescription: 80 (Internal Error)
-// 	// 即使发送失败也不影响后续重建
-// 	_ = c.writeRecordLocked(recordTypeAlert, []byte{2, 80}, oldSession)
-
-// 	// 1. Terminate old session
-// 	c.terminateSession(oldSession, reason)
-
-// 	// 2. Create new session
-// 	newSession := NewSession(oldSession.id, oldSession.remoteId, c)
-// 	c.sessions.Store(newSession.id, newSession)
-
-// 	// 3. Handshake (Async)
-// 	go func() {
-// 		log.Printf("Starting handshake for new session %s", newSession.id)
-// 		if err := newSession.Handshake(); err != nil {
-// 			log.Printf("New session handshake failed: %v", err)
-// 			c.terminateSession(newSession, err)
-// 		} else {
-// 			log.Printf("New session handshake success: %s", newSession.id)
-// 		}
-// 	}()
-
-//		return newSession
-//	}
 
 type PingPongHandler func(string) error

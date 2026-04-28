@@ -1,17 +1,26 @@
 package imparser
 
-type MsgData interface{
+import "errors"
+
+var ErrBypassSecureWS = errors.New("bypass secure ws")
+var ErrDropSecureWS = errors.New("drop secure ws")
+
+const SecureWSMarker = "__secure_ws__:"
+
+type MsgData interface {
 	GetSendID() string
 	GetRecvID() string
 	GetContent() []byte
 	SetContent(content []byte)
+	GetEx() string
+	SetEx(ex string)
 }
 
 type IMParser interface {
 	// MsgData 构造方法
 	ConstructMsgData(sendID, recvID string, msg []byte) MsgData
 
-	// 写方向 序列化与反序列化方法 
+	// 写方向 序列化与反序列化方法
 	// MsgData -> []byte -> Server 【之前client已有】
 	// MsgData <- []byte <- Server	【本次需补充的方向，与服务器收到客户端消息后的解析逻辑相同】
 	MsgDataToBytesWriteBound(msgData MsgData) ([]byte, error)
@@ -38,4 +47,3 @@ func ConstructCCSMsg(sendID, recvID string, p IMParser) MsgData {
 func ConstructAlterMsg(sendID, recvID string, p IMParser) MsgData {
 	return p.ConstructMsgData(sendID, recvID, []byte("Alter"))
 }
-

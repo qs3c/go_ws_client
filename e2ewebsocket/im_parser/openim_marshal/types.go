@@ -1,9 +1,9 @@
 package openimmarshal
 
 import (
+	"github.com/openimsdk/protocol/sdkws"
 	"github.com/qs3c/e2e-secure-ws/compressor"
 	"github.com/qs3c/e2e-secure-ws/encoder"
-	"github.com/openimsdk/protocol/sdkws"
 )
 
 type OpenIMParser struct {
@@ -68,6 +68,14 @@ func (m *MsgData) GetContent() []byte {
 
 func (m *MsgData) SetContent(content []byte) {
 	m.Content = content
+}
+
+func (m *MsgData) GetEx() string {
+	return m.Ex
+}
+
+func (m *MsgData) SetEx(ex string) {
+	m.Ex = ex
 }
 
 // type MsgData struct {

@@ -12,5 +12,8 @@ package crypto
 
 // Android arm (32-bit)
 #cgo android,arm LDFLAGS: -L${SRCDIR}/../third_party/tongsuo-install/android/armeabi-v7a/lib -L${SRCDIR}/sm2keyexch/android/armeabi-v7a -lcrypto -lssl -lkeyexchange
+
+// Android x86_64
+#cgo android,amd64 LDFLAGS: -L${SRCDIR}/../third_party/tongsuo-install/android/x86_64/lib -L${SRCDIR}/sm2keyexch/android/x86_64 -lcrypto -lssl -lkeyexchange
 */
 import "C"

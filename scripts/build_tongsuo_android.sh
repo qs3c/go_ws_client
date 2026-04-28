@@ -99,5 +99,6 @@ EOF
 
 build_arch "arm64-v8a" "android-arm64" "aarch64-linux-android" "aarch64-linux-android-"
 build_arch "armeabi-v7a" "android-arm" "armv7a-linux-androideabi" "arm-linux-androideabi-"
+build_arch "x86_64" "android-x86_64" "x86_64-linux-android" "x86_64-linux-android-"
 
 echo "All Android builds completed!"
