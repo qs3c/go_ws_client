@@ -53,6 +53,18 @@ type readMsgItem struct {
 	err       error
 }
 
+type batchReadParser interface {
+	BytesToMsgDataReadBoundBatch(data []byte) ([]im_parser.MsgData, error)
+}
+
+type secureReadMarker interface {
+	IsSecureReadBound() bool
+}
+
+type readReqIdentifierProvider interface {
+	ReadReqIdentifier() int32
+}
+
 func (c *Conn) readLoop() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -76,7 +88,6 @@ func (c *Conn) readLoop() {
 		conn := c.conn
 		lastConn = conn
 		c.connMu.Unlock()
-
 		for {
 			if err := c.readRecord(conn); err != nil {
 				c.connMu.Lock()
@@ -108,6 +119,27 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 		return nil
 	}
 
+	if batchParser, ok := c.imParser.(batchReadParser); ok {
+		items, err := batchParser.BytesToMsgDataReadBoundBatch(msg)
+		if err == nil {
+			for _, item := range items {
+				if err := c.handleReadBoundMsg(msgType, item); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if errors.Is(err, im_parser.ErrDropSecureWS) {
+			return nil
+		}
+		if errors.Is(err, im_parser.ErrBypassSecureWS) {
+			c.msgChan <- readMsgItem{msgType: msgType, msg: msg}
+			return nil
+		}
+		log.Printf("readLoop MsgDataFromServerReadBoundBatch error: %v", err)
+		return nil
+	}
+
 	msgData, err := c.imParser.BytesToMsgDataReadBound(msg)
 	if err != nil {
 		if errors.Is(err, im_parser.ErrDropSecureWS) {
@@ -121,14 +153,49 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 		return nil
 	}
 
-	senderId := msgData.GetSendID()
-	if senderId == "" {
-		log.Printf("readLoop secure message missing sender id")
+	return c.handleReadBoundMsg(msgType, msgData)
+}
+
+func (c *Conn) handleReadBoundMsg(msgType int, msgData im_parser.MsgData) error {
+	if msgData == nil {
 		return nil
 	}
-	sessionId := getSessionID(c.hostId, senderId)
 
-	actual, loaded := c.sessions.LoadOrStore(sessionId, NewSession(sessionId, senderId, c))
+	isSecure := false
+	if marker, ok := msgData.(secureReadMarker); ok {
+		isSecure = marker.IsSecureReadBound()
+	}
+	if !isSecure {
+		msgDataBytes, err := c.imParser.MsgDataToBytesReadBound(msgData)
+		if err != nil {
+			log.Printf("readLoop MsgDataToBytesReadBound error: %v", err)
+			return nil
+		}
+		c.msgChan <- readMsgItem{
+			remoteId: c.inboundPeerID(msgData),
+			msgType:  msgType,
+			msg:      msgDataBytes,
+		}
+		return nil
+	}
+
+	if c.shouldDropSecureInbound(msgData) {
+		log.Printf("readLoop dropping synced secure payload before decrypt, reqIdentifier=%d", c.readReqIdentifier(msgData))
+		return nil
+	}
+	if c.shouldDropSecureSelfEcho(msgData) {
+		log.Printf("readLoop dropping secure sender echo from %s to %s", msgData.GetSendID(), msgData.GetRecvID())
+		return nil
+	}
+
+	peerID := c.inboundPeerID(msgData)
+	if peerID == "" {
+		log.Printf("readLoop secure message missing peer id")
+		return nil
+	}
+	sessionId := getSessionID(c.hostId, peerID)
+
+	actual, loaded := c.sessions.LoadOrStore(sessionId, NewSession(sessionId, peerID, c))
 	session := actual.(*Session)
 	if !loaded {
 		go func(s *Session) {
@@ -141,12 +208,19 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 	handshakeComplete := session.isHandshakeComplete.Load()
 	plaintext, err := session.in.decrypt(msgData.GetContent())
 	if err != nil {
-		log.Printf("readLoop decrypt error: %v", err)
+		log.Printf("readLoop decrypt error for session %s: %v", sessionId, err)
+		if c.shouldDropSecureInbound(msgData) {
+			log.Printf("readLoop dropping undecryptable synced secure payload for session %s", sessionId)
+			return nil
+		}
 		c.terminateSession(session, err)
 		return nil
 	}
 	if len(plaintext) < 1 {
 		log.Printf("readLoop secure payload is empty")
+		if c.shouldDropSecureInbound(msgData) {
+			return nil
+		}
 		c.terminateSession(session, errors.New("empty secure payload"))
 		return nil
 	}
@@ -158,15 +232,21 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 	switch typ {
 	default:
 		log.Printf("readLoop unexpected message type: %d", typ)
+		if c.shouldDropSecureInbound(msgData) {
+			return nil
+		}
 		c.terminateSession(session, errors.New("UnexpectedMessage"))
 		return nil
 	case recordTypeAlert:
 		if string(data) != "Alert" {
 			log.Printf("readLoop invalid alert message")
+			if c.shouldDropSecureInbound(msgData) {
+				return nil
+			}
 			c.terminateSession(session, errors.New("AlertMessageLenError"))
 			return nil
 		}
-		log.Printf("readLoop received alert from %s", senderId)
+		log.Printf("readLoop received alert from %s", peerID)
 		c.closeSessionLocally(session, errors.New("received alert"))
 		return nil
 	case recordTypeApplicationData:
@@ -180,6 +260,9 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 				case <-session.handshakeComplete:
 				case <-ctx.Done():
 					log.Printf("readLoop handshake wait timeout for session %s", sessionId)
+					if c.shouldDropSecureInbound(msgData) {
+						return nil
+					}
 					c.terminateSession(session, errors.New("alertUnexpectedMessage"))
 					return nil
 				case <-session.done:
@@ -191,12 +274,15 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 		msgDataBytes, err := c.imParser.MsgDataToBytesReadBound(msgData)
 		if err != nil {
 			log.Printf("readLoop MsgDataToBytesReadBound error: %v", err)
+			if c.shouldDropSecureInbound(msgData) {
+				return nil
+			}
 			c.terminateSession(session, err)
 			return nil
 		}
 		c.msgChan <- readMsgItem{
 			sessionId: sessionId,
-			remoteId:  senderId,
+			remoteId:  peerID,
 			msgType:   msgType,
 			msg:       msgDataBytes,
 		}
@@ -205,16 +291,25 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 		case session.handshakeChan <- sessionMsg{typ: recordTypeHandshake, data: data}:
 		default:
 			log.Printf("readLoop handshake channel blocked for session %s", session.id)
+			if c.shouldDropSecureInbound(msgData) {
+				return nil
+			}
 			c.terminateSession(session, errors.New("handshake channel blocked"))
 			return nil
 		}
 	case recordTypeChangeCipherSpec:
 		if len(data) != 3 || string(data) != "CCS" {
+			if c.shouldDropSecureInbound(msgData) {
+				return nil
+			}
 			c.terminateSession(session, errors.New("alertDecodeError"))
 			return nil
 		}
 		if err := session.in.changeCipherSpec(); err != nil {
 			log.Printf("readLoop changeCipherSpec error: %v", err)
+			if c.shouldDropSecureInbound(msgData) {
+				return nil
+			}
 			c.terminateSession(session, errors.New("change cipher failed"))
 			return nil
 		}
@@ -222,6 +317,39 @@ func (c *Conn) readRecord(conn *websocket.Conn) error {
 	return nil
 }
 
+func (c *Conn) inboundPeerID(msgData im_parser.MsgData) string {
+	sendID := msgData.GetSendID()
+	recvID := msgData.GetRecvID()
+	switch {
+	case sendID == "":
+		return recvID
+	case sendID == c.hostId && recvID != "":
+		return recvID
+	default:
+		return sendID
+	}
+}
+
+func (c *Conn) readReqIdentifier(msgData im_parser.MsgData) int32 {
+	if provider, ok := msgData.(readReqIdentifierProvider); ok {
+		return provider.ReadReqIdentifier()
+	}
+	return 0
+}
+
+func (c *Conn) shouldDropSecureInbound(msgData im_parser.MsgData) bool {
+	reqIdentifier := c.readReqIdentifier(msgData)
+	return reqIdentifier != 0 && reqIdentifier != 2001
+}
+
+func (c *Conn) shouldDropSecureSelfEcho(msgData im_parser.MsgData) bool {
+	if msgData == nil {
+		return false
+	}
+	sendID := msgData.GetSendID()
+	recvID := msgData.GetRecvID()
+	return sendID != "" && sendID == c.hostId && recvID != "" && recvID != c.hostId
+}
 func (c *Conn) ReadMessage() (int, []byte, error) {
 	item, ok := <-c.msgChan
 	if !ok {
@@ -307,7 +435,6 @@ func (c *Conn) writeRecordLocked(typ recordType, msgData im_parser.MsgData, sess
 	if err != nil {
 		return err
 	}
-
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
